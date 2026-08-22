@@ -19,8 +19,13 @@ Do not merge the two repositories and do not commit generated home data here.
 The preferred Mac checkout is:
 
 ```text
-~/Repos/Projekty/home-assistant-config-sync
+~/Repos/Projekty/home-assistant-workspace/home-assistant-config-sync
 ```
+
+When both projects are needed, open
+`~/Repos/Projekty/home-assistant-workspace` as the Codex workspace and follow
+its root `AGENTS.md` for task routing. Dashboard and home-data changes belong in
+the sibling `home-assistant-config` repository, not in this repository.
 
 ## Repository structure
 
