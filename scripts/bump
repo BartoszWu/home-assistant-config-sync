@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "Usage: scripts/bump <export|import> <patch|minor|major>" >&2
+  exit 2
+}
+
+[[ $# -eq 2 ]] || usage
+
+app="$1"
+part="$2"
+
+case "$app" in
+  export|import) ;;
+  *) usage ;;
+esac
+
+case "$part" in
+  patch|minor|major) ;;
+  *) usage ;;
+esac
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+config="$root/$app/config.yaml"
+
+python3 - "$config" "$app" "$part" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+app = sys.argv[2]
+part = sys.argv[3]
+text = path.read_text(encoding="utf-8")
+pattern = re.compile(r'(?m)^(version:\s*["\']?)(\d+)\.(\d+)\.(\d+)(["\']?\s*)$')
+match = pattern.search(text)
+
+if not match:
+    raise SystemExit(f"No semantic version found in {path}")
+
+major, minor, patch = map(int, match.group(2, 3, 4))
+old = f"{major}.{minor}.{patch}"
+
+if part == "major":
+    major, minor, patch = major + 1, 0, 0
+elif part == "minor":
+    minor, patch = minor + 1, 0
+else:
+    patch += 1
+
+new = f"{major}.{minor}.{patch}"
+replacement = f"{match.group(1)}{new}{match.group(5)}"
+path.write_text(text[:match.start()] + replacement + text[match.end():], encoding="utf-8")
+print(f"{app}: {old} -> {new}")
+print(path)
+PY

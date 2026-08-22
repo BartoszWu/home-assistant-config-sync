@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+"$root/scripts/bump" "$@"
+"$root/scripts/check"
+
+git -C "$root" diff -- export/config.yaml import/config.yaml
+git -C "$root" status --short
+
+echo "Release prepared locally. Review the diff, then commit and push explicitly."

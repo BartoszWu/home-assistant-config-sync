@@ -1,0 +1,32 @@
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local environment and generated artifacts
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.tgz
+*.tar.gz
+
+# Home Assistant credentials and app data must never enter this repository
+addon_config/
+addon_configs/
+**/addon_config/
+**/addon_configs/
+**/ssh/
+github_ed25519
+known_hosts_443
+id_rsa
+id_ed25519
+*.key
+*.pem
+*.p12
+secrets.yaml
