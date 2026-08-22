@@ -13,6 +13,17 @@ The application code lives here. The exported home data remains in the separate 
 
 The split keeps the GitHub write credential out of the web-facing Import App. Neither App receives Docker access, host networking, full access, or direct access to `/config/.storage`.
 
+After at least one dashboard is successfully applied and verified, Import fires the Home Assistant event `ha_config_sync_import_applied`. The existing `Sync HA config to GitHub` automation listens for that event and starts Export. Import does not know the installed Export App ID and never receives its GitHub write key. A failed or blocked Apply does not request an Export.
+
+## Everyday dashboard workflow
+
+```text
+edit dashboard JSON → commit and push → Import → review → Apply
+→ automatic Export → GitHub reflects the verified Home Assistant state
+```
+
+The Export request happens immediately after a successful Apply. The same Home Assistant automation may still run Export on its normal schedule and after Home Assistant starts.
+
 ## Repository layout
 
 ```text

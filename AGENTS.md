@@ -44,7 +44,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.5.0` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.1` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.2` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -130,6 +130,8 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Every POST refreshes GitHub and repeats the conflict check before saving.
 - Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
 - Every save is read back and hash-verified.
+- After at least one verified Apply, Import fires `ha_config_sync_import_applied` once. The Home Assistant automation owns the installed Export App ID and starts Export; Import must not hard-code that ID.
+- A blocked or failed Apply must not request Export. If some selected dashboards succeed and others fail, request one Export after processing the whole selection.
 - Automations, scripts, and scenes are currently review/snapshot-only; do not add Apply support casually.
 
 During migrations, prefer an Import smoke test of Ingress, GitHub read access, status, and diff. Do not perform a risky Apply unless a clearly safe test change already exists and the status is unambiguous.
@@ -206,11 +208,10 @@ Prefer leaving old `addon_configs` directories as temporary credential backups u
 
 As of 2026-08-22:
 
-- The initial commit IDs were intentionally rewritten to remove private author metadata; do not rely on pre-cleanup hashes.
-- Sources were copied from the running HAOS local Apps rather than reconstructed from chat history.
-- `scripts/check` passed and no credentials were committed.
-- The legacy Apps were deliberately left running.
-- Adding the custom repository in Home Assistant failed because GitHub requested authentication, indicating that the App Repository was private.
-- No new repository Apps were installed, no credentials were copied, no automation was changed, and no legacy App was stopped or uninstalled.
+- The code repository is public and installed in Home Assistant as a custom App Repository.
+- Repository-installed Export and Import Apps have passed their migration smoke tests.
+- The legacy local Apps were removed by the user; their old IDs must not be used.
+- `Sync HA config to GitHub` starts the repository-installed Export App and preserves its Home Assistant-start delay and daily schedule.
+- The automation also listens for `ha_config_sync_import_applied`, which Import fires once after a verified Apply.
 
-Before continuing that migration, verify the current state instead of assuming this checkpoint is still accurate.
+Verify live Home Assistant state before changing installation-specific IDs or automation configuration.

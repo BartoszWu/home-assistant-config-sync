@@ -20,6 +20,7 @@ KEY = Path("/review/ssh/github_ed25519")
 KNOWN_HOSTS = Path("/review/ssh/known_hosts_443")
 WORKDIR = Path("/tmp/home-assistant-config")
 STATE_FILE = Path("state/dashboard-bases.json")
+IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
 
 SENSITIVE_KEYS = {
@@ -90,7 +91,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </head>
 <body><main>
 <header>
-  <div><h1>HA Config Sync — Import</h1><div class="small">One GitHub file per dashboard · GitHub read-only · Apply via Home Assistant API</div></div>
+  <div><h1>HA Config Sync — Import</h1><div class="small">One GitHub file per dashboard · GitHub read-only · Apply via Home Assistant API · Export requested after verified Apply</div></div>
   <form method="get"><button id="refresh-button" type="submit">Refresh GitHub</button></form>
 </header>
 
@@ -310,6 +311,14 @@ def save_dashboard(relative, desired):
     ha_ws_call("lovelace/config/save", **payload)
 
 
+def request_export(applied):
+    ha_ws_call(
+        "fire_event",
+        event_type=IMPORT_APPLIED_EVENT,
+        event_data={"dashboards": applied, "count": len(applied)},
+    )
+
+
 def pretty_lines(value):
     return json.dumps(
         value, ensure_ascii=False, indent=2, sort_keys=True
@@ -447,6 +456,7 @@ def apply_selected():
         abort(400)
 
     results = []
+    applied = []
     with REPO_LOCK:
         try:
             refresh_repo()
@@ -472,8 +482,24 @@ def apply_selected():
                     "ok": True,
                     "message": f"{relative}: Applied and verified.",
                 })
+                applied.append(relative)
         except Exception as exception:
             results.append({"ok": False, "message": f"Apply failed: {exception}"})
+    if applied:
+        try:
+            request_export(applied)
+            results.append({
+                "ok": True,
+                "message": "Automatic Export requested through Home Assistant.",
+            })
+        except Exception as exception:
+            results.append({
+                "ok": False,
+                "message": (
+                    "Dashboards were applied, but automatic Export could not "
+                    f"be requested: {exception}"
+                ),
+            })
     return render_review(results)
 
 
