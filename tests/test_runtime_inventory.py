@@ -83,18 +83,28 @@ class RuntimeInventoryTests(unittest.TestCase):
             areas,
         )
 
-        self.assertEqual(result["schema_version"], 2)
-        self.assertEqual(result["record_type"], "current_state_snapshot")
+        self.assertEqual(result["schema_version"], 3)
+        self.assertEqual(result["record_type"], "entity_state_snapshot")
+        self.assertEqual(result["source"], "home_assistant")
+        self.assertEqual(
+            result["snapshot_semantics"],
+            "point_in_time_not_history",
+        )
+        self.assertEqual(
+            result["status_values"],
+            ["available", "unavailable", "unknown", "disabled"],
+        )
         self.assertEqual(
             [item["entity_id"] for item in result["states"]],
             ["sensor.dishwasher_status", "sensor.washer_status"],
         )
 
         dishwasher = result["states"][0]
-        self.assertEqual(dishwasher["record_type"], "entity_runtime_state")
-        self.assertEqual(dishwasher["source"], "home_assistant_websocket")
+        self.assertEqual(dishwasher["record_type"], "entity_state")
+        self.assertEqual(dishwasher["source"], "home_assistant")
+        self.assertEqual(dishwasher["domain"], "sensor")
         self.assertEqual(dishwasher["friendly_name"], "Dishwasher operation state")
-        self.assertEqual(dishwasher["device"], "Dishwasher")
+        self.assertEqual(dishwasher["device_name"], "Dishwasher")
         self.assertEqual(dishwasher["device_id"], "device-dishwasher")
         self.assertEqual(dishwasher["area"], "Kitchen")
         self.assertEqual(dishwasher["status"], "available")
@@ -163,16 +173,18 @@ class RuntimeInventoryTests(unittest.TestCase):
         }
 
         self.assertFalse(result["sensor.disabled"]["enabled"])
-        self.assertFalse(result["sensor.disabled"]["loaded"])
         self.assertEqual(result["sensor.disabled"]["status"], "disabled")
         self.assertIsNone(result["sensor.disabled"]["state"])
         self.assertEqual(result["sensor.disabled"]["disabled_by"], "integration")
 
         self.assertTrue(result["sensor.unavailable"]["enabled"])
-        self.assertTrue(result["sensor.unavailable"]["loaded"])
         self.assertEqual(result["sensor.unavailable"]["status"], "unavailable")
         self.assertEqual(result["sensor.unknown"]["status"], "unknown")
         self.assertEqual(result["sensor.available"]["status"], "available")
+        self.assertLessEqual(
+            {item["status"] for item in result.values()},
+            {"available", "unavailable", "unknown", "disabled"},
+        )
 
     def test_uses_per_integration_attribute_allowlists(self):
         attributes = safe_runtime_attributes("home_connect", {

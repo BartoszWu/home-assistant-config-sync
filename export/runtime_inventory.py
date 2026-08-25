@@ -6,6 +6,13 @@ RUNTIME_INTEGRATIONS = frozenset({
     "lg_thinq",
 })
 
+STATUS_VALUES = (
+    "available",
+    "unavailable",
+    "unknown",
+    "disabled",
+)
+
 COMMON_ATTRIBUTE_KEYS = frozenset({
     "device_class",
     "event_type",
@@ -273,10 +280,11 @@ def build_runtime_inventory(
         }
 
         records.append({
-            "record_type": "entity_runtime_state",
-            "source": "home_assistant_websocket",
+            "record_type": "entity_state",
+            "source": "home_assistant",
             "entity_id": entity_id,
             "integration": integration,
+            "domain": entity_id.split(".", 1)[0],
             "friendly_name": (
                 attributes.get("friendly_name")
                 or safe_runtime_text(
@@ -284,7 +292,7 @@ def build_runtime_inventory(
                     or entity.get("original_name")
                 )
             ),
-            "device": safe_runtime_text(
+            "device_name": safe_runtime_text(
                 device.get("name_by_user")
                 or device.get("name")
             ),
@@ -292,7 +300,6 @@ def build_runtime_inventory(
             "area": safe_runtime_text(area.get("name")),
             "enabled": disabled_by is None,
             "disabled_by": disabled_by,
-            "loaded": loaded,
             "status": status,
             "state": safe_runtime_text(raw_state),
             "device_class": (
@@ -320,9 +327,11 @@ def build_runtime_inventory(
     records.sort(key=lambda item: item["entity_id"])
 
     return {
-        "schema_version": 2,
-        "record_type": "current_state_snapshot",
-        "source": "home_assistant_websocket",
+        "schema_version": 3,
+        "record_type": "entity_state_snapshot",
+        "source": "home_assistant",
+        "snapshot_semantics": "point_in_time_not_history",
+        "status_values": list(STATUS_VALUES),
         "integrations": sorted(RUNTIME_INTEGRATIONS),
         "states": records,
     }

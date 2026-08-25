@@ -539,10 +539,10 @@ runtime_lines = [
     f"States: **{len(runtime_payload['states'])}**",
     "",
     (
-        "| Entity ID | Device | Area | Integration | Status | State | "
+        "| Entity ID | Domain | Device | Area | Integration | Status | State | "
         "Device class | Unit | Options | Last updated |"
     ),
-    "|---|---|---|---|---|---|---|---|---|---|",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
 ]
 
 for item in runtime_payload["states"]:
@@ -553,7 +553,8 @@ for item in runtime_payload["states"]:
         + " | ".join(
             [
                 f"`{md(item['entity_id'])}`",
-                md(item["device"]),
+                md(item["domain"]),
+                md(item["device_name"]),
                 md(item["area"]),
                 md(item["integration"]),
                 md(item["status"]),

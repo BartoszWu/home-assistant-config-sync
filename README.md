@@ -12,6 +12,13 @@ private URLs, IP addresses, MAC addresses or external device identifiers. The
 current state's `last_changed` and `last_updated` timestamps and Home Assistant
 registry `device_id` are included to make each record self-describing.
 
+The runtime file is an LLM-facing API contract. Every record uses
+`record_type: entity_state`, `source: home_assistant`, an explicit `domain`,
+`enabled`, `status` and `state`. The status vocabulary is closed to
+`available`, `unavailable`, `unknown` and `disabled`; disabled entities always
+have `state: null`. The file-level `snapshot_semantics` field states that the
+timestamps describe one point-in-time export rather than history.
+
 ## Architecture
 
 | App | Runtime | GitHub access | Home Assistant access |

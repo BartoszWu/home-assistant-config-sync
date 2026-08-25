@@ -43,7 +43,7 @@ Current product identity:
 
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
-| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.0` |
+| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
 | `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.2` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
@@ -114,6 +114,11 @@ Export is a one-shot job. Preserve these properties:
   current state's `last_changed` and `last_updated` timestamps are retained.
 - Runtime state values are sanitized for credential-like strings, private IPs,
   MAC addresses and identifier-like values before they can be staged.
+- Runtime records use the closed status vocabulary `available`, `unavailable`,
+  `unknown`, and `disabled`. A disabled record must have `enabled: false` and
+  `state: null`; do not add alternative status spellings.
+- `last_changed` and `last_updated` describe only the current point-in-time
+  snapshot and must never be presented as a history series.
 - Dashboards are read through the Home Assistant WebSocket API.
 - Automations, scripts, and scenes are exported as sanitized snapshots through supported HA APIs.
 - Dashboard base state contains SHA-256 hashes only.
