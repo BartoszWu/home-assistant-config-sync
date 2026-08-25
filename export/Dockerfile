@@ -18,6 +18,7 @@ RUN apk add --no-cache \
 
 COPY run.sh /run.sh
 COPY exporter.py /exporter.py
+COPY runtime_inventory.py /runtime_inventory.py
 COPY dashboard_exporter.py /dashboard_exporter.py
 COPY managed_config_exporter.py /managed_config_exporter.py
 COPY sync_dashboards.py /sync_dashboards.py

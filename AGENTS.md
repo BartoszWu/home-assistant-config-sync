@@ -43,7 +43,7 @@ Current product identity:
 
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
-| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.5.0` |
+| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.0` |
 | `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.2` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
@@ -105,8 +105,15 @@ Run `./scripts/check` before every commit. It validates the repository structure
 Export is a one-shot job. Preserve these properties:
 
 - Inventory is built from allowlisted fields, not raw HA objects.
-- MAC addresses, identifier-like values, and private IPs are sanitized from human-readable fields.
-- States, history, raw `.storage`, and credentials are not exported.
+- MAC addresses, external identifier-like values, and private IPs are sanitized
+  from human-readable fields. The internal Home Assistant registry `device_id`
+  is allowed only in the private runtime snapshot.
+- Current states for Home Connect and LG ThinQ are exported through a strict
+  per-integration field allowlist to the private data repository; history, raw
+  state attributes, raw `.storage`, and credentials are not exported. Only the
+  current state's `last_changed` and `last_updated` timestamps are retained.
+- Runtime state values are sanitized for credential-like strings, private IPs,
+  MAC addresses and identifier-like values before they can be staged.
 - Dashboards are read through the Home Assistant WebSocket API.
 - Automations, scripts, and scenes are exported as sanitized snapshots through supported HA APIs.
 - Dashboard base state contains SHA-256 hashes only.

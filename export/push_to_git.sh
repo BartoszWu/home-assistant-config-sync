@@ -47,8 +47,10 @@ mkdir -p \
     "$WORKDIR/config"
 
 cp /export/entities.json "$WORKDIR/inventory/entities.json"
+cp /export/states.json "$WORKDIR/inventory/states.json"
 cp /export/ENTITIES.md "$WORKDIR/docs/ENTITIES.md"
 cp /export/DEVICES.md "$WORKDIR/docs/DEVICES.md"
+cp /export/STATES.md "$WORKDIR/docs/STATES.md"
 
 python3 /sync_dashboards.py "$WORKDIR" "$CURRENT_DASHBOARDS"
 
@@ -65,8 +67,10 @@ git config user.email "home-assistant-exporter@localhost"
 # Explicit allowlist. Never use a repository-wide `git add .` here.
 git add -- \
     inventory/entities.json \
+    inventory/states.json \
     docs/ENTITIES.md \
-    docs/DEVICES.md
+    docs/DEVICES.md \
+    docs/STATES.md
 
 git add -A -- \
     dashboards \

@@ -148,6 +148,10 @@ print("Permissions boundary: OK")
 print("Secret scan: OK")
 PY
 
+python3 -m unittest discover \
+  -s "$root/tests" \
+  -p 'test_*.py'
+
 for script in "$root"/scripts/* "$root"/export/*.sh "$root"/import/*.sh; do
   [[ -f "$script" ]] || continue
   bash -n "$script"

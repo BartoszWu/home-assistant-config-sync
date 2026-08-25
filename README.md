@@ -4,6 +4,14 @@ Home Assistant App Repository containing two deliberately separate Apps for sync
 
 The application code lives here. The exported home data remains in the separate [`BartoszWu/home-assistant-config`](https://github.com/BartoszWu/home-assistant-config) repository.
 
+Export also writes a sanitized current-state snapshot for entities provided by
+the official Home Connect and LG ThinQ integrations. The snapshot contains the
+current state, availability and a small allowlist of dashboard-relevant
+metadata. It never contains history, raw attributes, credentials,
+private URLs, IP addresses, MAC addresses or external device identifiers. The
+current state's `last_changed` and `last_updated` timestamps and Home Assistant
+registry `device_id` are included to make each record self-describing.
+
 ## Architecture
 
 | App | Runtime | GitHub access | Home Assistant access |
@@ -33,6 +41,7 @@ The Export request happens immediately after a successful Apply. The same Home A
 │   ├── config.yaml
 │   ├── Dockerfile
 │   ├── run.sh
+│   ├── runtime_inventory.py
 │   └── source files
 ├── import/
 │   ├── config.yaml

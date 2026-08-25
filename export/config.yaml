@@ -1,6 +1,6 @@
 name: "HA Config Sync — Export"
 description: "Export sanitized Home Assistant configuration to GitHub"
-version: "0.5.0"
+version: "0.6.0"
 slug: "ha_config_sync_export"
 url: "https://github.com/BartoszWu/home-assistant-config-sync"
 
