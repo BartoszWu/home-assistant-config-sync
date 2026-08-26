@@ -39,6 +39,18 @@ edit dashboard JSON → commit and push → Import → review → Apply
 
 The Export request happens immediately after a successful Apply. The same Home Assistant automation may still run Export on its normal schedule and after Home Assistant starts.
 
+For a new dashboard, first create its empty UI-controlled shell in Home
+Assistant so the URL path and sidebar metadata exist. Import recognizes that
+semantically empty shell without requiring an exported base, labels it
+`READY TO APPLY — NEW DASHBOARD`, and requires the exact HA configuration hash
+from the review immediately before Apply. After the verified bootstrap Apply,
+the normal automatic Export creates the base hash. A non-empty dashboard
+without a base remains blocked as a conflict.
+
+If Apply succeeds but the automatic Export request fails, GitHub and HA match
+while the base is still absent. Import reports
+`IN SYNC — BASE NOT INITIALIZED` and provides a button to request Export again.
+
 ## Repository layout
 
 ```text

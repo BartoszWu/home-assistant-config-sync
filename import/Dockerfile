@@ -19,6 +19,7 @@ RUN apk add --no-cache \
         "websocket-client==1.8.0"
 
 COPY app.py /app.py
+COPY dashboard_logic.py /dashboard_logic.py
 COPY run.sh /run.sh
 
 RUN chmod 0755 /run.sh

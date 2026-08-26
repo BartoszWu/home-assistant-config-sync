@@ -1,5 +1,4 @@
 import difflib
-import hashlib
 import json
 import os
 import re
@@ -10,6 +9,15 @@ from pathlib import Path, PurePosixPath
 
 from flask import Flask, abort, render_template_string, request
 from websocket import create_connection
+
+from dashboard_logic import (
+    APPLYABLE_STATUSES,
+    MISSING_BASE_STATUS,
+    classify,
+    digest,
+    matches_preview,
+    parse_preview_hashes,
+)
 
 
 app = Flask(__name__)
@@ -54,7 +62,9 @@ button[disabled] { opacity:.45; cursor:not-allowed; }
 .status { display:inline-block; padding:4px 9px; border-radius:12px; font-size:12px; font-weight:750; margin-left:7px; }
 .same { background:#e8eaed; }
 .ready { background:#d8f3dc; color:#165a2e; }
+.bootstrap { background:#d8f3dc; color:#165a2e; }
 .changed { background:#fff0c2; color:#624b00; }
+.missing-base { background:#fff0c2; color:#624b00; }
 .conflict,.unsafe,.error { background:#ffd6d6; color:#7a1717; }
 .result { padding:12px 14px; border-radius:8px; margin-bottom:10px; background:#d8f3dc; }
 .result.bad { background:#ffd6d6; }
@@ -107,12 +117,23 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <div class="result {% if not result.ok %}bad{% endif %}">{{ result.message }}</div>
 {% endfor %}
 
+{% if has_missing_base %}
+<section class="card">
+  <h3 style="margin-top:0">Base initialization needed</h3>
+  <p>GitHub and Home Assistant already match, but no exported base hash exists.</p>
+  <form method="post" action="export"><button type="submit">Request Export to initialize base</button></form>
+</section>
+{% endif %}
+
 <form id="apply-form" method="post" action="apply">
 {% if not changes %}<div class="card"><h2>No dashboard files</h2><p>Add JSON files directly under <code>dashboards/</code>.</p></div>{% endif %}
 {% for change in changes %}
 <section class="card">
   <div class="change-head">
-    {% if change.selectable %}<input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}">{% endif %}
+    {% if change.selectable %}
+    <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}">
+    <input type="hidden" name="preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+    {% endif %}
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
     <span class="counts">{{ change.added }} added · {{ change.removed }} removed</span>
   </div>
@@ -145,7 +166,7 @@ if (form) {
     if (form.dataset.submitting === 'true') return;
     const selected = form.querySelectorAll('input[name="selected"]:checked');
     if (!selected.length) {
-      window.alert('Select at least one READY TO APPLY dashboard.');
+      window.alert('Select at least one dashboard ready to apply.');
       return;
     }
     form.dataset.submitting = 'true';
@@ -210,16 +231,6 @@ def refresh_repo():
 def load_json(path):
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
-
-
-def canonical_bytes(value):
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-
-
-def digest(value):
-    return hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
 def base_hash(entry):
@@ -353,37 +364,6 @@ def side_by_side(current, github):
     return rows, added, removed
 
 
-def classify(relative, github, current, base):
-    github_hash = digest(github)
-    current_hash = digest(current)
-    reason = unsafe_reason(github)
-    if reason:
-        return "UNSAFE", "unsafe", False, reason
-    if github_hash == current_hash:
-        return "SAME", "same", False, "GitHub HEAD matches HA current."
-    if base is None:
-        return (
-            "CONFLICT", "conflict", False,
-            "No exported base hash exists and GitHub differs from HA. Run HA Config Sync — Export only after resolving this manually.",
-        )
-    github_changed = github_hash != base
-    ha_changed = current_hash != base
-    if github_changed and not ha_changed:
-        return (
-            "READY TO APPLY", "ready", True,
-            "GitHub changed while HA still matches the last exported base.",
-        )
-    if not github_changed and ha_changed:
-        return (
-            "CHANGED IN HA", "changed", False,
-            "HA changed locally while GitHub still matches the base. Run HA Config Sync — Export to publish the HA change.",
-        )
-    return (
-        "CONFLICT", "conflict", False,
-        "Both GitHub and HA changed from the last exported base. Nothing can be applied automatically.",
-    )
-
-
 def valid_relative(value):
     path = PurePosixPath(value)
     return len(path.parts) == 1 and path.suffix == ".json" and ".." not in path.parts
@@ -402,7 +382,12 @@ def collect_changes():
         github = load_json(github_path)
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
-        status, css, selectable, reason = classify(relative, github, current, base)
+        status, css, selectable, reason = classify(
+            github,
+            current,
+            base,
+            unsafe=unsafe_reason(github),
+        )
         rows, added, removed = side_by_side(current, github)
         changes.append({
             "name": github_path.stem,
@@ -410,6 +395,7 @@ def collect_changes():
             "github": github,
             "current": current,
             "base": base,
+            "preview_ha_hash": digest(current),
             "status": status,
             "css": css,
             "selectable": selectable,
@@ -438,6 +424,9 @@ def render_review(results=None):
         commit=commit,
         branch=BRANCH,
         has_ready=any(change["selectable"] for change in changes),
+        has_missing_base=any(
+            change["status"] == MISSING_BASE_STATUS for change in changes
+        ),
         results=results or [],
     )
 
@@ -452,7 +441,17 @@ def apply_selected():
     selected = request.form.getlist("selected")
     if not selected:
         return render_review([{"ok": False, "message": "No READY dashboard selected."}])
-    if len(selected) > 20 or any(not valid_relative(value) for value in selected):
+    if (
+        len(selected) > 20
+        or len(set(selected)) != len(selected)
+        or any(not valid_relative(value) for value in selected)
+    ):
+        abort(400)
+    try:
+        previews = parse_preview_hashes(request.form.getlist("preview_hash"))
+    except ValueError:
+        abort(400)
+    if any(relative not in previews for relative in selected):
         abort(400)
 
     results = []
@@ -463,7 +462,18 @@ def apply_selected():
             fresh = {change["relative"]: change for change in collect_changes()}
             for relative in selected:
                 change = fresh.get(relative)
-                if not change or change["status"] != "READY TO APPLY":
+                if change and not matches_preview(
+                    change["current"], previews[relative]
+                ):
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            f"{relative}: HA changed since preview. "
+                            "Refresh and review the new diff before Apply."
+                        ),
+                    })
+                    continue
+                if not change or change["status"] not in APPLYABLE_STATUSES:
                     status = change["status"] if change else "missing"
                     results.append({
                         "ok": False,
@@ -499,6 +509,39 @@ def apply_selected():
                     "Dashboards were applied, but automatic Export could not "
                     f"be requested: {exception}"
                 ),
+            })
+    return render_review(results)
+
+
+@app.route("/export", methods=["POST"])
+def export_missing_bases():
+    results = []
+    missing = []
+    with REPO_LOCK:
+        try:
+            refresh_repo()
+            missing = [
+                change["relative"]
+                for change in collect_changes()
+                if change["status"] == MISSING_BASE_STATUS
+            ]
+            if missing:
+                request_export(missing)
+                results.append({
+                    "ok": True,
+                    "message": (
+                        "Export requested to initialize missing dashboard bases."
+                    ),
+                })
+            else:
+                results.append({
+                    "ok": False,
+                    "message": "No in-sync dashboard with a missing base was found.",
+                })
+        except Exception as exception:
+            results.append({
+                "ok": False,
+                "message": f"Export request failed: {exception}",
             })
     return render_review(results)
 

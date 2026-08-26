@@ -44,7 +44,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.2` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.3` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -138,7 +138,15 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Path traversal and nested paths are rejected.
 - Desired dashboard JSON is scanned for credential-like fields and URLs.
 - Status is derived from GitHub HEAD, current HA state, and the exported base hash.
-- Apply is allowed only for `READY TO APPLY`.
+- A registered dashboard without a base hash may bootstrap only when its current
+  HA configuration is a semantically empty shell. Import labels this state
+  `READY TO APPLY — NEW DASHBOARD`, carries the exact HA preview hash in the
+  review form, and requires the same hash immediately before saving.
+- A dashboard that is already identical in GitHub and HA but still lacks a
+  base is labeled `IN SYNC — BASE NOT INITIALIZED` and offers an explicit
+  Export retry. A non-empty dashboard without a base remains a conflict.
+- Apply is allowed only for `READY TO APPLY` or the guarded
+  `READY TO APPLY — NEW DASHBOARD` bootstrap state.
 - Every POST refreshes GitHub and repeats the conflict check before saving.
 - Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
 - Every save is read back and hash-verified.
