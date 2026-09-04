@@ -44,7 +44,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.3.3` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.0` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -130,6 +130,18 @@ Export is a one-shot job. Preserve these properties:
 The destination data repository and branch are currently fixed in code as `BartoszWu/home-assistant-config`, branch `main`.
 
 ## Import behavior
+
+- Optional Visual previews use the installed native HA frontend (`hui-root`)
+  in same-origin browser frames, with the browser's existing session. Before and
+  After configurations are held only in memory; never create or overwrite an HA
+  dashboard to render them. No Supervisor token is sent to this adapter.
+- The adapter is experimental/internal-frontend-dependent. Preserve its read-only
+  API facade, disabled mutation callbacks and non-interactive frames. Render only
+  explicit native configurations, and fail closed for unsupported configurations.
+- Keep Visual failure independent of Apply and keep the original diff accessible
+  even if the JS module fails to load. Dispose frames on error, Cancel, Apply and
+  navigation. No persisted preview resource lifecycle or extra App permissions
+  are required. See README for first-view and session/compatibility limitations.
 
 Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 

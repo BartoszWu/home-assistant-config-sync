@@ -51,6 +51,73 @@ If Apply succeeds but the automatic Export request fails, GitHub and HA match
 while the base is still absent. Import reports
 `IN SYNC — BASE NOT INITIALIZED` and provides a button to request Export again.
 
+## Visual dashboard preview (Import)
+
+The existing side-by-side JSON diff is preserved under the **YAML diff** tab
+(the label does not convert the exported JSON into YAML). **Visual** is the
+preferred dashboard tab when JavaScript is available. Click **Generate visual
+preview** to load desktop (1440×900) and mobile (390×844), Before/After.
+Apply and its fresh conflict check/read-back verification are unchanged.
+Cancel clears the selection and disposes previews; nothing needs rolling back.
+
+The renderer loads the installed Home Assistant frontend in same-origin frames
+using the browser's existing HA session, then supplies the current/desired
+review configurations to HA's own `hui-root` component. After exists only in
+frame memory. **No temporary dashboard is created, and no production dashboard
+is overwritten.** The renderer does not use the backend Supervisor credential,
+extract browser tokens, save screenshots, or implement its own cards. Frames
+are non-interactive and the preview's HA facade rejects writes/unknown commands;
+save, delete and edit callbacks are disabled. The original HA frontend remains
+hidden inside each frame to retain its session while the preview is mounted.
+
+This is an experimental frontend adapter, **not a supported public HA preview
+API**. The integration seam follows
+[`ha-panel-lovelace`](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/ha-panel-lovelace.ts)
+and [`hui-root`](https://github.com/home-assistant/frontend/blob/dev/src/panels/lovelace/hui-root.ts).
+Missing authentication, blocked frames, incompatible frontend versions, errors
+and timeouts show “Visual preview unavailable. YAML diff is still available.”
+They never disable Apply. If JavaScript itself fails to load, the original diff
+is visible without enhancement.
+
+MVP limits:
+
+- These are live frontend renders, **not PNG screenshots**. Only the first view
+  is shown, with a fixed-height viewport; lower content is cropped.
+- Before uses the current HA config read for the review; After uses the exact
+  GitHub config in that same review. Entity states are sampled separately while
+  rendering, not frozen or synchronized across the four frames.
+- Requires the standard same-origin HA web session and root-relative dashboard
+  URLs. Companion-app auth, path-prefix proxies and cross-origin Ingress may not
+  support this mechanism. There is no token-passing workaround.
+- Targets explicit native-card dashboards. Custom cards and strategy-generated
+  configurations fail closed. Additional card data uses a read-command allowlist;
+  unsupported data requests may produce a card error. Themes come from the session.
+- Export currently enumerates registered storage dashboards. Import still only
+  reviews direct `dashboards/*.json`; this feature does not add YAML-mode writes
+  or imports of automations/scripts/scenes.
+- At most one dashboard's four frames are retained. Tab switching reuses them.
+  Cancel, another dashboard preview, Apply or leaving the page destroys them.
+  A new explicit generation after cleanup starts a new preview session.
+- There are no persisted temporary resources to orphan after a browser crash.
+  Render failures also remove frames and disconnect resize observers.
+
+Validation: `scripts/check` runs Python tests and, when Node.js is available,
+the dependency-free JS tests. Install Import's Flask/websocket-client runtime
+dependencies to include the HTTP integration tests (otherwise they report skips).
+An optional browser harness uses a separately installed Playwright:
+
+```bash
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright \
+IMPORT_TEST_PYTHON=/absolute/path/to/venv/bin/python \
+node --test tests/browser_visual_preview.mjs
+```
+
+`CHROMIUM_EXECUTABLE` may select an existing Chrome binary. The browser harness
+uses synthetic data and a mock of the HA component boundary. It does **not**
+establish real-HA compatibility. Before production use, smoke-test the installed
+HA version: all four renders, YAML diff, Cancel, frame cleanup and a known-safe
+Apply with read-back verification. Confirm no preview dashboards are registered.
+
 ## Repository layout
 
 ```text

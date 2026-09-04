@@ -18,6 +18,7 @@ from dashboard_logic import (
     matches_preview,
     parse_preview_hashes,
 )
+from visual_preview import prepare_preview
 
 
 app = Flask(__name__)
@@ -83,7 +84,14 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 .right-add { background:#dcf8e3; }
 .blank { background:#f6f7f8; }
 .counts { margin-left:auto; font-size:13px; color:#687078; }
-.actions { position:sticky; bottom:0; display:flex; justify-content:flex-end; padding-top:12px; }
+.actions { position:sticky; bottom:0; display:flex; gap:8px; justify-content:flex-end; padding-top:12px; }
+.preview-tabs { display:flex; gap:8px; margin:12px 0; }
+.preview-tabs button[aria-selected="false"] { background:#687078; }
+.preview-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
+.preview-viewport { position:relative; overflow:hidden; background:#f4f6f8; }
+.preview-viewport iframe { position:absolute; top:0; left:0; border:0; transform-origin:top left; pointer-events:none; }
+.preview-viewport::after { content:""; position:absolute; inset:0; }
+[hidden] { display:none !important; }
 .apply-progress { display:none; align-items:center; gap:9px; margin-right:12px; padding:9px 12px; border-radius:8px; background:#e3f2fd; color:#174f78; font-weight:650; }
 .apply-progress.visible { display:flex; }
 .spinner { width:16px; height:16px; border:3px solid #8bcdf1; border-top-color:#0277bd; border-radius:50%; animation:spin .75s linear infinite; }
@@ -140,18 +148,35 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   <div class="small">Dashboard · dashboards/{{ change.relative }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   <details {% if change.status != 'SAME' %}open{% endif %}>
-    <summary>Side-by-side diff</summary>
+    <summary>Review changes</summary>
+    {% if change.visual %}
+    <div class="visual-review">
+      <script type="application/json" class="preview-data">{{ change.visual | tojson }}</script>
+      <div class="preview-tabs" role="tablist" aria-label="Preview {{ change.name }}">
+        <button type="button" role="tab" aria-selected="false" data-preview-tab="visual">Visual</button>
+        <button type="button" role="tab" aria-selected="true" data-preview-tab="yaml">YAML diff</button>
+      </div>
+      <div class="visual-panel" role="tabpanel" hidden>
+        <p class="small">Native HA frontend · first view · read-only · states at render time</p>
+        <button type="button" class="preview-load">Generate visual preview</button>
+        <p class="preview-status" role="status" aria-live="polite"></p>
+        <div class="preview-renders"></div>
+      </div>
+    </div>
+    {% endif %}
+    <div class="yaml-panel">
     <div class="diff-wrap"><table class="diff">
       <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
       <tbody>{% for row in change.rows %}<tr>
         <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
         <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
       </tr>{% endfor %}</tbody>
-    </table></div>
+    </table></div></div>
   </details>
 </section>
 {% endfor %}
 <div class="actions">
+  <button id="cancel-button" type="reset">Cancel</button>
   <div id="apply-progress" class="apply-progress" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Applying and verifying…</span></div>
   <button id="apply-button" type="submit" {% if not has_ready %}disabled{% endif %}>Apply selected</button>
 </div>
@@ -180,6 +205,7 @@ if (form) {
   });
 }
 </script>
+<script type="module" src="static/visual-preview.mjs"></script>
 </body></html>
 """
 
@@ -390,6 +416,7 @@ def collect_changes():
         )
         rows, added, removed = side_by_side(current, github)
         changes.append({
+            "visual": prepare_preview(relative, current, github, unsafe_reason),
             "name": github_path.stem,
             "relative": relative,
             "github": github,

@@ -20,6 +20,8 @@ RUN apk add --no-cache \
 
 COPY app.py /app.py
 COPY dashboard_logic.py /dashboard_logic.py
+COPY visual_preview.py /visual_preview.py
+COPY static /static
 COPY run.sh /run.sh
 
 RUN chmod 0755 /run.sh

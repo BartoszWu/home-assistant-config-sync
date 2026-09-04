@@ -1,0 +1,28 @@
+<!doctype html><html><body><home-assistant></home-assistant>
+<script>
+// Models only the integration seam. This is NOT proof of compatibility with HA.
+window.writes = 0;
+const write = () => { window.writes++; throw Error('Unexpected write'); };
+customElements.define('hui-view', class extends HTMLElement {
+  constructor() { super(); this.attachShadow({mode: 'open'}).innerHTML = '<div>Native view fixture</div>'; }
+});
+customElements.define('hui-root', class extends HTMLElement {
+  constructor() { super(); this.attachShadow({mode: 'open'}); }
+  connectedCallback() {
+    this.shadowRoot.innerHTML = '<h1></h1><hui-view></hui-view>';
+    this.shadowRoot.querySelector('h1').textContent = this.lovelace?.config.views[0].title || 'Original';
+    this.updateComplete = Promise.resolve();
+  }
+});
+customElements.define('ha-panel-lovelace', class extends HTMLElement {
+  constructor() {
+    super();
+    this.hass = {connection: {sendMessagePromise: write}, callWS: write, callService: write};
+    this.lovelace = {urlPath: 'test-dashboard', locale: {}, saveConfig: write};
+    this.panel = {url_path: 'test-dashboard'};
+    this.route = {prefix: '/test-dashboard', path: '/0'};
+    this.attachShadow({mode: 'open'}).append(document.createElement('hui-root'));
+  }
+});
+document.querySelector('home-assistant').attachShadow({mode: 'open'}).append(document.createElement('ha-panel-lovelace'));
+</script></body></html>

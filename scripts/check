@@ -152,6 +152,13 @@ python3 -m unittest discover \
   -s "$root/tests" \
   -p 'test_*.py'
 
+if command -v node >/dev/null; then
+  node --check "$root/import/static/visual-preview.mjs"
+  node --test "$root/tests/test_visual_preview.mjs"
+else
+  echo "JavaScript tests skipped: install Node.js to run them."
+fi
+
 for script in "$root"/scripts/* "$root"/export/*.sh "$root"/import/*.sh; do
   [[ -f "$script" ]] || continue
   bash -n "$script"
