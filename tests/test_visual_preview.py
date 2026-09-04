@@ -113,6 +113,27 @@ class PreviewPreparationTests(unittest.TestCase):
 HAS_RUNTIME = all(importlib.util.find_spec(module) for module in ("flask", "websocket"))
 
 
+class ImportTemplateTests(unittest.TestCase):
+    def test_dark_mode_feedback_panels_have_explicit_contrasting_colors(self):
+        source = Path(__file__).resolve().parents[1] / "import/app.py"
+        html_template = source.read_text(encoding="utf-8")
+        css = html_template.split("<style>\n", 1)[1].split("\n</style>", 1)[0]
+        dark_css = css.split("@media (prefers-color-scheme:dark)", 1)[1]
+        self.assertRegex(
+            css,
+            r"\.result \{[^}]*background:var\(--result-background\);"
+            r"[^}]*color:var\(--result-text\);",
+        )
+        self.assertRegex(
+            css,
+            r"\.reason \{[^}]*background:var\(--reason-background\);"
+            r"[^}]*color:var\(--reason-text\);",
+        )
+        for variable in ("--result-background:", "--result-text:",
+                         "--reason-background:", "--reason-text:"):
+            self.assertIn(variable, dark_css)
+
+
 @unittest.skipUnless(HAS_RUNTIME, "Install Import's Flask/websocket-client dependencies for HTTP tests")
 class PreviewHttpTests(unittest.TestCase):
     def setUp(self):
