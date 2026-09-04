@@ -44,7 +44,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.0` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.1` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -137,7 +137,10 @@ The destination data repository and branch are currently fixed in code as `Barto
   dashboard to render them. No Supervisor token is sent to this adapter.
 - The adapter is experimental/internal-frontend-dependent. Preserve its read-only
   API facade, disabled mutation callbacks and non-interactive frames. Render only
-  explicit native configurations, and fail closed for unsupported configurations.
+  explicit native configurations. Replace custom cards in known card slots with
+  inert native placeholders only in deep-copied preview configs; never alter
+  original diff/hash/Apply inputs. Report partial previews. Unsupported non-card
+  elements (custom views/badges/entity rows) and strategies still fail closed.
 - Keep Visual failure independent of Apply and keep the original diff accessible
   even if the JS module fails to load. Dispose frames on error, Cancel, Apply and
   navigation. No persisted preview resource lifecycle or extra App permissions

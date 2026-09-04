@@ -89,9 +89,20 @@ MVP limits:
 - Requires the standard same-origin HA web session and root-relative dashboard
   URLs. Companion-app auth, path-prefix proxies and cross-origin Ingress may not
   support this mechanism. There is no token-passing workaround.
-- Targets explicit native-card dashboards. Custom cards and strategy-generated
-  configurations fail closed. Additional card data uses a read-command allowlist;
+- Targets explicit native-card dashboards. Custom cards in card slots (including
+  sections, stacks and conditional cards) are replaced **only in deep-copied
+  preview configurations** with inert native button placeholders. They show the
+  omitted type, never the custom content or actions. A partial-preview notice
+  reports Before/After counts. Basic section dimensions and visibility conditions
+  are retained; placeholder heights/layout are approximate. Original JSON,
+  YAML diff, hashes and Apply payloads are never rewritten.
+- Custom views, badges, entity rows and strategy-generated configurations still
+  fail closed: a card placeholder would be invalid in those slots.
+  Additional card data uses a read-command allowlist;
   unsupported data requests may produce a card error. Themes come from the session.
+- The read allowlist includes HA's `lovelace/info` bootstrap query. Import 0.4.0
+  omitted it, so the read-only facade rejected native `hui-root` initialization;
+  0.4.1 covers this integration seam with unit and browser regression tests.
 - Export currently enumerates registered storage dashboards. Import still only
   reviews direct `dashboards/*.json`; this feature does not add YAML-mode writes
   or imports of automations/scripts/scenes.

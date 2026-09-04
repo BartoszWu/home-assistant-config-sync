@@ -42,13 +42,14 @@ test('browser: four frames, tab cache, cancel cleanup and fail-safe', {
     const renders = await Promise.all(frames.map(frame => frame.evaluate(() => ({
       width: window.innerWidth, height: window.innerHeight,
       title: document.body.querySelector('hui-root').shadowRoot.querySelector('h1').textContent,
+      reads: window.reads,
       writes: window.writes,
     }))));
     assert.deepEqual(renders, [
-      {width: 1440, height: 900, title: 'Before', writes: 0},
-      {width: 1440, height: 900, title: 'After', writes: 0},
-      {width: 390, height: 844, title: 'Before', writes: 0},
-      {width: 390, height: 844, title: 'After', writes: 0},
+      {width: 1440, height: 900, title: 'Before', reads: 1, writes: 0},
+      {width: 1440, height: 900, title: 'After', reads: 1, writes: 0},
+      {width: 390, height: 844, title: 'Before', reads: 1, writes: 0},
+      {width: 390, height: 844, title: 'After', reads: 1, writes: 0},
     ]);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
     if (process.env.PREVIEW_QA_SCREENSHOT) await page.screenshot({path: process.env.PREVIEW_QA_SCREENSHOT, fullPage: true});

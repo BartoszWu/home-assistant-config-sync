@@ -94,12 +94,13 @@ test('native card API facade blocks mutations and hides socket/auth', () => {
     callWS: send, callService: () => assert.fail('service call'),
   });
   readonly.callWS({type: 'get_states'});
-  assert.equal(messages.length, 1);
+  readonly.callWS({type: 'lovelace/info'});
+  assert.equal(messages.length, 2);
   assert.throws(() => readonly.callWS({type: 'lovelace/config/save'}));
   assert.throws(() => readonly.connection.sendMessagePromise({type: 'lovelace/dashboards/create'}));
   assert.throws(() => readonly.callService('light', 'turn_on'));
   assert.throws(() => readonly.callApi('POST', 'anything'));
   assert.equal(readonly.connection.socket, undefined);
   assert.equal(readonly.auth, undefined);
-  assert.equal(messages.length, 1);
+  assert.equal(messages.length, 2);
 });

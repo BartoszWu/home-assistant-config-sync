@@ -33,7 +33,7 @@ const READ_COMMANDS = new Set([
   'media_player/browse_media', 'media_player/thumbnail',
   'config/entity_registry/list', 'config/device_registry/list',
   'config/area_registry/list', 'config/floor_registry/list',
-  'lovelace/config', 'lovelace/resources',
+  'lovelace/config', 'lovelace/resources', 'lovelace/info',
 ]);
 
 export function readonlyHass(hass) {

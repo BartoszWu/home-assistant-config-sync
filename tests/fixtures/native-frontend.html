@@ -2,22 +2,30 @@
 <script>
 // Models only the integration seam. This is NOT proof of compatibility with HA.
 window.writes = 0;
+window.reads = 0;
 const write = () => { window.writes++; throw Error('Unexpected write'); };
+const callWS = message => {
+  if (message?.type !== 'lovelace/info') return write();
+  window.reads++;
+  return Promise.resolve({mode: 'storage'});
+};
 customElements.define('hui-view', class extends HTMLElement {
   constructor() { super(); this.attachShadow({mode: 'open'}).innerHTML = '<div>Native view fixture</div>'; }
 });
 customElements.define('hui-root', class extends HTMLElement {
   constructor() { super(); this.attachShadow({mode: 'open'}); }
   connectedCallback() {
-    this.shadowRoot.innerHTML = '<h1></h1><hui-view></hui-view>';
-    this.shadowRoot.querySelector('h1').textContent = this.lovelace?.config.views[0].title || 'Original';
-    this.updateComplete = Promise.resolve();
+    const ready = this.hass ? this.hass.callWS({type: 'lovelace/info'}) : Promise.resolve();
+    this.updateComplete = ready.then(() => {
+      this.shadowRoot.innerHTML = '<h1></h1><hui-view></hui-view>';
+      this.shadowRoot.querySelector('h1').textContent = this.lovelace?.config.views[0].title || 'Original';
+    });
   }
 });
 customElements.define('ha-panel-lovelace', class extends HTMLElement {
   constructor() {
     super();
-    this.hass = {connection: {sendMessagePromise: write}, callWS: write, callService: write};
+    this.hass = {connection: {sendMessagePromise: write}, callWS, callService: write};
     this.lovelace = {urlPath: 'test-dashboard', locale: {}, saveConfig: write};
     this.panel = {url_path: 'test-dashboard'};
     this.route = {prefix: '/test-dashboard', path: '/0'};

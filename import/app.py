@@ -158,6 +158,12 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
       </div>
       <div class="visual-panel" role="tabpanel" hidden>
         <p class="small">Native HA frontend · first view · read-only · states at render time</p>
+        {% if change.visual.placeholder_types %}
+        <p class="reason">Partial preview — custom cards replaced with placeholders.
+          Before: {{ change.visual.placeholder_counts.before }} · After: {{ change.visual.placeholder_counts.after }}.
+          Types: {{ change.visual.placeholder_types | join(', ') }}.
+          Layout is approximate. YAML diff and Apply use the original configuration.</p>
+        {% endif %}
         <button type="button" class="preview-load">Generate visual preview</button>
         <p class="preview-status" role="status" aria-live="polite"></p>
         <div class="preview-renders"></div>
