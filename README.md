@@ -101,8 +101,9 @@ MVP limits:
   Additional card data uses a read-command allowlist;
   unsupported data requests may produce a card error. Themes come from the session.
 - The read allowlist includes HA's `lovelace/info` bootstrap query. Import 0.4.0
-  omitted it, so the read-only facade rejected native `hui-root` initialization;
-  0.4.1 covers this integration seam with unit and browser regression tests.
+  omitted it, so the read-only facade rejected native `hui-root` initialization.
+  Import 0.4.2 covers this seam with unit/browser regression tests and uses a
+  content hash in the module URL so HA/browser caches cannot retain the old adapter.
 - Export currently enumerates registered storage dashboards. Import still only
   reviews direct `dashboards/*.json`; this feature does not add YAML-mode writes
   or imports of automations/scripts/scenes.

@@ -1,5 +1,6 @@
 import importlib.util
 import copy
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -199,6 +200,12 @@ class PreviewHttpTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("javascript", response.content_type)
         response.close()
+
+    def test_module_url_uses_content_hash_to_bust_browser_cache(self):
+        script = Path(__file__).resolve().parents[1] / "import/static/visual-preview.mjs"
+        version = hashlib.sha256(script.read_bytes()).hexdigest()[:12]
+        html = self.request().get_data(as_text=True)
+        self.assertIn(f'src="static/visual-preview.mjs?v={version}"', html)
 
     def test_embedded_json_cannot_close_script(self):
         self.change["visual"]["after"] = {"views": [{"title": "</script><img src=x>"}]}

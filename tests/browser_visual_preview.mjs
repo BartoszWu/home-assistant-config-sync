@@ -84,9 +84,14 @@ test('browser: four frames, tab cache, cancel cleanup and fail-safe', {
     assert.equal(await page.locator('#apply-button').isEnabled(), true);
 
     // A missing/broken JS bundle must not hide the original diff.
-    await page.route('**/static/visual-preview.mjs', route => route.abort());
-    await page.reload();
-    assert.equal(await page.locator('.yaml-panel').isVisible(), true);
+    await page.close();
+    const noScriptPage = await browser.newPage();
+    await noScriptPage.route('**/static/visual-preview.mjs*', route => route.fulfill({
+      contentType: 'text/javascript', body: 'throw new Error("fixture module failed")',
+    }));
+    await noScriptPage.goto(url);
+    assert.equal(await noScriptPage.locator('.yaml-panel').isVisible(), true);
+    await noScriptPage.close();
   } finally {
     await browser?.close();
     server.kill();

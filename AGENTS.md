@@ -44,7 +44,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.1` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.2` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 

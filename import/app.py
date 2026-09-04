@@ -1,4 +1,5 @@
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,8 @@ from visual_preview import prepare_preview
 
 
 app = Flask(__name__)
+VISUAL_PREVIEW_ASSET = Path(__file__).with_name("static") / "visual-preview.mjs"
+VISUAL_PREVIEW_VERSION = hashlib.sha256(VISUAL_PREVIEW_ASSET.read_bytes()).hexdigest()[:12]
 
 REPO = "ssh://git@ssh.github.com:443/BartoszWu/home-assistant-config.git"
 BRANCH = "main"
@@ -211,7 +214,7 @@ if (form) {
   });
 }
 </script>
-<script type="module" src="static/visual-preview.mjs"></script>
+<script type="module" src="static/visual-preview.mjs?v={{ visual_preview_version }}"></script>
 </body></html>
 """
 
@@ -461,6 +464,7 @@ def render_review(results=None):
             change["status"] == MISSING_BASE_STATUS for change in changes
         ),
         results=results or [],
+        visual_preview_version=VISUAL_PREVIEW_VERSION,
     )
 
 
