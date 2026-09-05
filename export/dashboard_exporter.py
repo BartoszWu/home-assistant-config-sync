@@ -11,6 +11,7 @@ WS_URL = "ws://supervisor/core/websocket"
 OUTPUT_DIR = Path("/tmp/ha-current/dashboards")
 
 from security import unsafe_reason, safe_text
+from dashboard_manifest import resource_record, custom_dependencies
 
 
 def ws_call(ws, message_id, message_type, **extra):
@@ -46,22 +47,6 @@ def filename_for(url_path):
     ).strip("._")
 
     return (value or "lovelace") + ".json"
-
-
-def custom_dependencies(value):
-    found = set()
-    def walk(node):
-        if isinstance(node, dict):
-            kind = node.get("type")
-            if isinstance(kind, str) and re.fullmatch(r"custom:[a-zA-Z0-9_-]+", kind):
-                found.add(kind)
-            for child in node.values():
-                walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
-    walk(value)
-    return sorted(found)
 
 
 token = os.environ.get("SUPERVISOR_TOKEN")
@@ -118,6 +103,8 @@ with connect(WS_URL, open_timeout=15) as ws:
         "schema_version": 2,
         "source": "Home Assistant Lovelace WebSocket API",
         "dashboards": [],
+        "scope_exclusions": [{"scope": "non_storage_dashboards", "status": "intentionally_excluded",
+                              "reason": "Built-in, default and YAML configurations are outside Export scope; the API list may omit them."}],
     }
 
     for dashboard in dashboards:
@@ -130,15 +117,9 @@ with connect(WS_URL, open_timeout=15) as ws:
     try:
         resources = ws_call(ws, 2, "lovelace/resources")
         index["resources"] = []
-        for resource in resources:
-            url = resource.get("url", "")
-            allowed = isinstance(url, str) and re.fullmatch(r"/(?:hacsfiles|local)/[A-Za-z0-9_./-]+\.js(?:\?hacstag=[0-9]+)?", url) and ".." not in url
-            if allowed and not unsafe_reason(url):
-                index["resources"].append({"url": url, "type": safe_text(resource.get("type")), "status": "success"})
-            else:
-                index["resources"].append({"status": "security_excluded"})
+        index["resources"] = [resource_record(resource) for resource in resources]
         index["resources"].sort(key=lambda x: x.get("url", ""))
-        index["resources_status"] = "success"
+        index["resources_status"] = "security_excluded" if any(x["status"] != "success" for x in index["resources"]) else "success"
     except Exception:
         index["resources_status"] = "read_error"
     message_id = 2
@@ -221,6 +202,8 @@ with connect(WS_URL, open_timeout=15) as ws:
                 "require_admin": dashboard.get("require_admin") is True,
                 "exported": True,
                 "status": "success",
+                "mode": "storage",
+                "strategy": safe_text(config.get("strategy", {}).get("type")),
                 "views": [{key: safe_text(view.get(key)) for key in ("title", "path", "type", "icon")}
                           for view in config.get("views", []) if isinstance(view, dict)],
                 "custom_dependencies": custom_dependencies(config),

@@ -94,3 +94,15 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         with patch.object(app, 'save_dashboard') as save:
             self.assertEqual(self.submit().status_code, 400)
             save.assert_not_called()
+
+class ResourcePolicyTests(unittest.TestCase):
+    def test_hacs_resource_drops_version_without_false_mac_exclusion(self):
+        from dashboard_manifest import resource_record
+        record = resource_record({'url': '/hacsfiles/example/example.js?hacstag=123456789012', 'type': 'module'})
+        self.assertEqual(record, {'url': '/hacsfiles/example/example.js', 'type': 'module', 'status': 'success'})
+
+    def test_resource_unknown_queries_and_private_urls_fail_closed(self):
+        from dashboard_manifest import resource_record
+        for url in ('/hacsfiles/example/example.js?token=synthetic', 'https://user:synthetic@example.test/a.js',
+                    '/local/../private.js', '/local/a.js?unclassified=value'):
+            self.assertEqual(resource_record({'url': url, 'type': 'module'}), {'status': 'security_excluded'})

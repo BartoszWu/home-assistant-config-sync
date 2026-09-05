@@ -108,7 +108,7 @@ def publish(repo, source=Path('/export'), dashboards=Path('/tmp/ha-current/dashb
         manifest['dashboards'].sort(key=lambda x: x.get('url_path') or '')
         write_json(repo / 'inventory/dashboards.json', manifest)
         sections['dashboards']['complete'] = all(x['status'] in {'success', 'intentionally_excluded'} for x in manifest['dashboards']) and manifest['resources_status'] == 'success'
-        sections['dashboards']['statuses'] = sorted({x['status'] for x in manifest['dashboards']} | {manifest['resources_status']})
+        sections['dashboards']['statuses'] = sorted({x['status'] for x in manifest['dashboards']} | {manifest['resources_status']} | {x['status'] for x in manifest.get('scope_exclusions', [])})
     else:
         sections['dashboards']['retained_previous'] = True
     write_json(repo / 'inventory/export-status.json', status)
