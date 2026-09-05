@@ -126,3 +126,13 @@ class PublicationGateTests(unittest.TestCase):
             write_json(repo / 'dashboards/fixture.json', {'views': [{'localKey': 'synthetic'}]})
             with self.assertRaises(ValueError):
                 validate(repo)
+
+    def test_unknown_inventory_schema_cannot_bypass_final_gate(self):
+        import tempfile
+        from sync_dashboards import write_json
+        from validate_export import validate
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            write_json(repo / 'inventory/entities.json', {'schema_version': 999, 'unclassified': 'value'})
+            with self.assertRaises(ValueError):
+                validate(repo)

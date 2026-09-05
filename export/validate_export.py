@@ -40,11 +40,24 @@ def validate(repo):
     inventory = repo / 'inventory/entities.json'
     if inventory.exists():
         payload = json.loads(inventory.read_text())
-        if payload.get('schema_version') == 3:
+        version = payload.get('schema_version')
+        if version not in {2, 3}:
+            raise ValueError('Unsupported inventory schema')
+        if version == 2:
+            legacy_keys = {'entity_id', 'name', 'domain', 'area', 'floor', 'device_class',
+                           'disabled', 'disabled_by', 'entity_category', 'device_name',
+                           'manufacturer', 'model', 'integration', 'translation_key'}
+            if set(payload) != {'schema_version', 'source', 'counts', 'entities'} or any(
+                    set(record) != legacy_keys for record in payload['entities']):
+                raise ValueError('Legacy inventory field has no export policy')
+        if version == 3:
             if set(payload) != INVENTORY_ROOT:
                 raise ValueError('Inventory root has no export policy')
             for record in payload['entities']:
-                if set(record) - ENTITY_KEYS:
+                allowed = {'entity_id', 'domain', 'source', 'runtime_only'} if record.get('runtime_only') else ENTITY_KEYS
+                if record.get('runtime_only') and record.get('entity_id') != 'zone.home':
+                    raise ValueError('Runtime-only entity has no export policy')
+                if set(record) != allowed:
                     raise ValueError('Entity field has no export policy')
                 if set(record.get('capabilities', {})) - CLIMATE_CONFIG_KEYS:
                     raise ValueError('Capability field has no export policy')
@@ -60,6 +73,11 @@ def validate(repo):
             for name, content in render_markdown(payload).items():
                 if (repo / 'docs' / name).read_text() != content:
                     raise ValueError('Markdown differs from canonical inventory')
+        count_keys = {'entities', 'devices', 'areas', 'floors'}
+        if version == 3:
+            count_keys |= {'registry_entities', 'runtime_only'}
+        if set(payload['counts']) != count_keys or any(type(n) is not int or n < 0 for n in payload['counts'].values()):
+            raise ValueError('Invalid inventory counts')
         inventory_values(payload)
     runtime = repo / 'inventory/states.json'
     if runtime.exists():
