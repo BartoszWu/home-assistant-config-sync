@@ -10,35 +10,7 @@ from websockets.sync.client import connect
 WS_URL = "ws://supervisor/core/websocket"
 OUTPUT_DIR = Path("/tmp/ha-current/dashboards")
 
-SENSITIVE_KEYS = {
-    "password",
-    "passwd",
-    "token",
-    "access_token",
-    "refresh_token",
-    "api_key",
-    "apikey",
-    "client_secret",
-    "secret",
-    "authorization",
-    "credential",
-    "credentials",
-    "local_key",
-    "bindkey",
-    "private_key",
-}
-
-SECRET_IN_URL_RE = re.compile(
-    r"(?i)[?&](?:token|access_token|api[_-]?key|secret|password)="
-)
-
-PRIVATE_URL_RE = re.compile(
-    r"(?i)https?://(?:"
-    r"10\."
-    r"|192\.168\."
-    r"|172\.(?:1[6-9]|2[0-9]|3[01])\."
-    r")"
-)
+from security import unsafe_reason, safe_text
 
 
 def ws_call(ws, message_id, message_type, **extra):
@@ -51,54 +23,17 @@ def ws_call(ws, message_id, message_type, **extra):
     ws.send(json.dumps(message))
 
     while True:
-        response = json.loads(ws.recv())
+        response = json.loads(ws.recv(timeout=30))
 
         if response.get("id") != message_id:
             continue
 
         if response.get("success") is not True:
             raise RuntimeError(
-                f"{message_type} failed: {response.get('error')}"
+                f"{message_type} read failed"
             )
 
         return response["result"]
-
-
-def unsafe_reason(value, path="$"):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = str(key).lower().replace("-", "_")
-
-            if normalized in SENSITIVE_KEYS:
-                if child not in (None, "", False):
-                    return f"sensitive field: {path}.{key}"
-
-            result = unsafe_reason(
-                child,
-                f"{path}.{key}",
-            )
-
-            if result:
-                return result
-
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            result = unsafe_reason(
-                child,
-                f"{path}[{index}]",
-            )
-
-            if result:
-                return result
-
-    elif isinstance(value, str):
-        if SECRET_IN_URL_RE.search(value):
-            return f"credential-like URL at {path}"
-
-        if PRIVATE_URL_RE.search(value):
-            return f"private network URL at {path}"
-
-    return None
 
 
 def filename_for(url_path):
@@ -113,6 +48,22 @@ def filename_for(url_path):
     return (value or "lovelace") + ".json"
 
 
+def custom_dependencies(value):
+    found = set()
+    def walk(node):
+        if isinstance(node, dict):
+            kind = node.get("type")
+            if isinstance(kind, str) and re.fullmatch(r"custom:[a-zA-Z0-9_-]+", kind):
+                found.add(kind)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+    walk(value)
+    return sorted(found)
+
+
 token = os.environ.get("SUPERVISOR_TOKEN")
 
 if not token:
@@ -123,7 +74,7 @@ print("Connecting for dashboard export...")
 
 with connect(WS_URL, open_timeout=15) as ws:
 
-    hello = json.loads(ws.recv())
+    hello = json.loads(ws.recv(timeout=30))
 
     if hello.get("type") != "auth_required":
         raise RuntimeError("Unexpected WebSocket response")
@@ -137,7 +88,7 @@ with connect(WS_URL, open_timeout=15) as ws:
         )
     )
 
-    auth = json.loads(ws.recv())
+    auth = json.loads(ws.recv(timeout=30))
 
     if auth.get("type") != "auth_ok":
         raise RuntimeError("Authentication failed")
@@ -164,18 +115,43 @@ with connect(WS_URL, open_timeout=15) as ws:
     )
 
     index = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "Home Assistant Lovelace WebSocket API",
         "dashboards": [],
     }
 
+    for dashboard in dashboards:
+        if not dashboard.get("id"):
+            index["dashboards"].append({
+                "url_path": safe_text(dashboard.get("url_path")),
+                "title": safe_text(dashboard.get("title")),
+                "exported": False, "status": "intentionally_excluded",
+                "reason": "outside storage dashboard scope"})
+    try:
+        resources = ws_call(ws, 2, "lovelace/resources")
+        index["resources"] = []
+        for resource in resources:
+            url = resource.get("url", "")
+            allowed = isinstance(url, str) and re.fullmatch(r"/(?:hacsfiles|local)/[A-Za-z0-9_./-]+\.js(?:\?hacstag=[0-9]+)?", url) and ".." not in url
+            if allowed and not unsafe_reason(url):
+                index["resources"].append({"url": url, "type": safe_text(resource.get("type")), "status": "success"})
+            else:
+                index["resources"].append({"status": "security_excluded"})
+        index["resources"].sort(key=lambda x: x.get("url", ""))
+        index["resources_status"] = "success"
+    except Exception:
+        index["resources_status"] = "read_error"
     message_id = 2
 
     for dashboard in storage_dashboards:
 
         url_path = dashboard.get("url_path")
-        title = dashboard.get("title") or url_path or "Lovelace"
+        title = safe_text(dashboard.get("title") or url_path or "Lovelace")
+        if not isinstance(url_path, str) or not re.fullmatch(r"[a-z0-9_-]+", url_path) or unsafe_reason(url_path):
+            index["dashboards"].append({"exported": False, "status": "security_excluded"})
+            continue
 
+        message_id += 1
         try:
             config = ws_call(
                 ws,
@@ -185,12 +161,11 @@ with connect(WS_URL, open_timeout=15) as ws:
                 force=False,
             )
 
-            message_id += 1
 
-        except Exception as err:
+        except Exception:
             print(
                 f"⚠️  Dashboard '{title}' skipped: "
-                f"cannot read config: {err}"
+                "cannot read config"
             )
 
             index["dashboards"].append(
@@ -199,6 +174,7 @@ with connect(WS_URL, open_timeout=15) as ws:
                     "title": title,
                     "exported": False,
                     "reason": "config read failed",
+                    "status": "read_error",
                 }
             )
 
@@ -218,6 +194,7 @@ with connect(WS_URL, open_timeout=15) as ws:
                     "title": title,
                     "exported": False,
                     "reason": reason,
+                    "status": "security_excluded",
                 }
             )
 
@@ -239,14 +216,14 @@ with connect(WS_URL, open_timeout=15) as ws:
             {
                 "url_path": url_path,
                 "title": title,
-                "icon": dashboard.get("icon"),
-                "show_in_sidebar": dashboard.get(
-                    "show_in_sidebar"
-                ),
-                "require_admin": dashboard.get(
-                    "require_admin"
-                ),
+                "icon": safe_text(dashboard.get("icon")),
+                "show_in_sidebar": dashboard.get("show_in_sidebar") is True,
+                "require_admin": dashboard.get("require_admin") is True,
                 "exported": True,
+                "status": "success",
+                "views": [{key: safe_text(view.get(key)) for key in ("title", "path", "type", "icon")}
+                          for view in config.get("views", []) if isinstance(view, dict)],
+                "custom_dependencies": custom_dependencies(config),
                 "file": filename,
             }
         )

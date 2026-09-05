@@ -43,8 +43,8 @@ Current product identity:
 
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
-| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.6.1` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.4.2` |
+| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `config.yaml` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `config.yaml` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -107,7 +107,7 @@ Export is a one-shot job. Preserve these properties:
 - Inventory is built from allowlisted fields, not raw HA objects.
 - MAC addresses, external identifier-like values, and private IPs are sanitized
   from human-readable fields. The internal Home Assistant registry `device_id`
-  is allowed only in the private runtime snapshot.
+  is allowed in the private runtime snapshot and canonical inventory v3.
 - Current states for Home Connect and LG ThinQ are exported through a strict
   per-integration field allowlist to the private data repository; history, raw
   state attributes, raw `.storage`, and credentials are not exported. Only the

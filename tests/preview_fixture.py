@@ -13,6 +13,7 @@ after = {"views": [{"title": "After", "cards": []}]}
 app.refresh_repo = lambda: "synthetic-fixture"
 app.collect_changes = lambda: [{
     "name": "test-dashboard", "relative": "test-dashboard.json",
+    "preview_desired_hash": digest(after),
     "current": before, "github": after, "preview_ha_hash": digest(before),
     "selectable": True, "status": "READY TO APPLY", "css": "ready", "reason": "",
     "rows": app.side_by_side(before, after)[0], "added": 1, "removed": 1,

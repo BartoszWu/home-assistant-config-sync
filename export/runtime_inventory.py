@@ -61,42 +61,8 @@ FLATTENED_ATTRIBUTE_KEYS = frozenset({
 MAX_TEXT_LENGTH = 256
 MAX_LIST_ITEMS = 128
 
-MAC_RE = re.compile(
-    r"(?i)(?<![0-9a-f])(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}(?![0-9a-f])"
-)
-
-HEX_MAC_RE = re.compile(
-    r"(?i)\b[0-9a-f]{12}\b"
-)
-
-IPV4_RE = re.compile(
-    r"\b(?:\d{1,3}\.){3}\d{1,3}\b"
-)
-
-SECRET_URL_RE = re.compile(
-    r"(?i)[?&](?:token|access_token|api[_-]?key|secret|password)="
-)
-
-ASSIGNED_SECRET_RE = re.compile(
-    r"(?i)\b(?:password|passwd|api[_-]?key|access[_-]?token|client[_-]?secret)\b\s*[:=]"
-)
-
-BEARER_RE = re.compile(
-    r"(?i)^bearer\s+[A-Za-z0-9._-]{20,}$"
-)
-
-CREDENTIAL_RE = re.compile(
-    r"(?:"
-    r"github_pat_[A-Za-z0-9_]{20,}"
-    r"|gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|sk-[A-Za-z0-9_-]{20,}"
-    r"|AKIA[0-9A-Z]{16}"
-    r")"
-)
-
-TOKEN_LIKE_RE = re.compile(
-    r"^(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{48,}|eyJ[A-Za-z0-9._-]{20,})$"
-)
+from security import safe_text, safe_entity_id, safe_internal_id, text_reason
+import math
 
 MDI_ICON_RE = re.compile(
     r"^mdi:[a-z0-9-]+$"
@@ -115,30 +81,12 @@ def safe_runtime_text(value):
         return value
 
     if isinstance(value, (int, float)):
-        return value
+        return value if math.isfinite(value) else None
 
     if not isinstance(value, str):
         return None
 
-    value = value.strip()
-
-    if len(value) > MAX_TEXT_LENGTH:
-        return "[redacted-long-value]"
-
-    if (
-        SECRET_URL_RE.search(value)
-        or ASSIGNED_SECRET_RE.search(value)
-        or BEARER_RE.fullmatch(value)
-        or CREDENTIAL_RE.search(value)
-        or TOKEN_LIKE_RE.fullmatch(value)
-    ):
-        return "[redacted-secret]"
-
-    value = MAC_RE.sub("[redacted-mac]", value)
-    value = HEX_MAC_RE.sub("[redacted-id]", value)
-    value = IPV4_RE.sub("[redacted-ip]", value)
-
-    return value
+    return safe_text(value)
 
 
 def safe_icon(value):
@@ -151,7 +99,9 @@ def safe_icon(value):
 
 
 def safe_registry_id(value):
-    if isinstance(value, str) and REGISTRY_ID_RE.fullmatch(value):
+    if safe_internal_id(value):
+        return value
+    if isinstance(value, str) and REGISTRY_ID_RE.fullmatch(value) and not text_reason(value):
         return value
 
     return None
@@ -242,7 +192,7 @@ def build_runtime_inventory(
         if integration not in RUNTIME_INTEGRATIONS:
             continue
 
-        entity_id = entity.get("entity_id")
+        entity_id = safe_entity_id(entity.get("entity_id"))
 
         if not entity_id:
             continue

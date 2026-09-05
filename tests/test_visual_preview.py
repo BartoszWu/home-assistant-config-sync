@@ -144,7 +144,7 @@ class PreviewHttpTests(unittest.TestCase):
         self.change = {
             "name": "test-dashboard", "relative": "test-dashboard.json",
             "github": AFTER, "current": BEFORE, "base": digest(BEFORE),
-            "preview_ha_hash": digest(BEFORE), "status": "READY TO APPLY",
+            "preview_desired_hash": digest(AFTER), "preview_ha_hash": digest(BEFORE), "status": "READY TO APPLY",
             "css": "ready", "selectable": True, "reason": "",
             "rows": app.side_by_side(BEFORE, AFTER)[0], "added": 1, "removed": 1,
             "visual": prepare_preview("test-dashboard.json", BEFORE, AFTER, lambda _: None),
@@ -178,10 +178,11 @@ class PreviewHttpTests(unittest.TestCase):
     def test_preview_error_does_not_disable_apply(self):
         self.change["visual"] = {"error": UNAVAILABLE}
         with patch.object(self.module, "save_dashboard") as save, \
-             patch.object(self.module, "ha_dashboard_config", return_value=AFTER), \
+             patch.object(self.module, "ha_dashboard_config", side_effect=[BEFORE, AFTER]), \
              patch.object(self.module, "request_export") as export:
             response = self.request("/apply", method="POST", data={
                 "selected": self.change["relative"],
+                "desired_hash": self.change["relative"] + ":" + self.change["preview_desired_hash"],
                 "preview_hash": self.change["relative"] + ":" + self.change["preview_ha_hash"],
             })
         self.assertIn("Applied and verified.", response.get_data(as_text=True))
@@ -191,6 +192,7 @@ class PreviewHttpTests(unittest.TestCase):
     def test_apply_and_diff_use_original_custom_card_not_preview_placeholder(self):
         desired = {"views": [{"cards": [{"type": "custom:apexcharts-card", "series": []}]}]}
         self.change["github"] = desired
+        self.change["preview_desired_hash"] = self.module.digest(desired)
         self.change["rows"] = self.module.side_by_side(BEFORE, desired)[0]
         self.change["visual"] = prepare_preview("test-dashboard.json", BEFORE, desired, lambda _: None)
         self.assertNotIn("error", self.change["visual"])
@@ -198,10 +200,11 @@ class PreviewHttpTests(unittest.TestCase):
         self.assertIn("Partial preview", html)
         self.assertIn('"type": "custom:apexcharts-card"', "\n".join(row["right"] for row in self.change["rows"]))
         with patch.object(self.module, "save_dashboard") as save, \
-             patch.object(self.module, "ha_dashboard_config", return_value=desired), \
+             patch.object(self.module, "ha_dashboard_config", side_effect=[BEFORE, desired]), \
              patch.object(self.module, "request_export"):
             response = self.request("/apply", method="POST", data={
                 "selected": self.change["relative"],
+                "desired_hash": self.change["relative"] + ":" + self.change["preview_desired_hash"],
                 "preview_hash": self.change["relative"] + ":" + self.change["preview_ha_hash"],
             })
         self.assertIn("Applied and verified.", response.get_data(as_text=True))

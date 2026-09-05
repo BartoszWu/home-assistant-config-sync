@@ -191,3 +191,61 @@ https://github.com/BartoszWu/home-assistant-config-sync
 ```
 
 The Apps are currently built locally by Home Assistant. Pre-built GHCR images and GitHub Actions can be added later.
+
+## Stage 1 inventory and safety contract
+
+`inventory/entities.json` uses `schema_version: 3`. It retains the `entities`
+array and adds canonical `devices`, `areas`, and `floors` arrays in the same
+snapshot, so relations and completeness share one export boundary. ENTITIES.md
+and DEVICES.md (including area/floor tables) are rendered from that JSON.
+No separate registry JSON files or second exporter are needed.
+
+Entity metadata joins the registry with the same Export's `get_states` response:
+class, state class, unit, friendly name, disabled/hidden flags, device/area/floor
+relations, and allowlisted climate capabilities. Climate temperatures and action
+values are omitted; only known runtime attribute names are recorded. Missing
+metadata can retain the last observed value only within schema v3 and the exact
+entity ID. Unsupported schema versions are never guessed or migrated implicitly.
+
+Identity v1 preserves exact safe entity IDs and internal HA device registry IDs.
+It never uses integration unique IDs, serials, connections or a new secret key.
+Future entity renames mean removed + added; name similarity is not identity.
+`zone.home` alone has an explicit runtime-only existence policy, with no state
+or location attributes. This does not authorize arbitrary runtime entities.
+
+The existing sanitizers share `export/security.py`; `import/security.py` is its
+identical mirror because App Docker build contexts are independent. After a
+policy edit, copy the source to the mirror; `scripts/check` rejects drift.
+Registry/state metadata remains an explicit field allowlist. Configuration
+snapshots retain their existing schema scope and undergo recursive security
+validation. Credential-like text, normalized secret keys, serial/user IDs,
+MAC variants, IPv4/IPv6 and credential-bearing URLs are rejected or redacted.
+Unknown metadata fields are not exported.
+
+Apply forms carry both the canonical SHA-256 of HA current and Git desired.
+POST refreshes Git and compares both approved contents, then re-reads HA before
+saving that same in-memory desired object. Any mismatch requires a new preview.
+HA does not provide an atomic compare-and-swap here; read-back verification
+remains required after saving.
+
+`inventory/dashboards.json` versions the dashboard manifest separately from the
+Import's `dashboards/*.json` inputs. It includes storage panel metadata, views,
+custom card types, safe local resources, Git/HA comparison and scope/security
+exclusions. Built-in dashboards are intentionally excluded from config export.
+
+`inventory/export-status.json` records timestamp, source and section read status.
+Object statuses distinguish `success`, `intentionally_excluded`, `unsupported`,
+`read_error`, and `security_excluded`. Inspect `complete` and object statuses;
+a successful list call alone does not establish full coverage. Read failures
+preserve previous snapshots and mark them as retained. Unsupported config reads
+(including integration scenes without Config API snapshots) do not imply deletion.
+An explicit security exclusion removes the corresponding unsafe managed snapshot.
+No dashboard is automatically deleted. A failed section cannot publish stale
+files left in the staging directory.
+
+Runtime remains the existing sanitized Home Connect/LG ThinQ `states.json` and
+STATES.md. Expanded runtime cache and transport across computers are deferred:
+a future cache should be outside Git, timestamped with source/completeness, use
+per-domain allowlists and refresh through authenticated HA access on each machine.
+Do not treat copying a cache or Git pull as live acquisition. No broad state
+snapshot, history, secret or additional runtime cache is introduced in this stage.

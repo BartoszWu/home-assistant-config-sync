@@ -35,14 +35,7 @@ STATE_FILE = Path("state/dashboard-bases.json")
 IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
 
-SENSITIVE_KEYS = {
-    "password", "passwd", "token", "access_token", "refresh_token",
-    "api_key", "apikey", "client_secret", "secret", "authorization",
-    "credential", "credentials", "local_key", "bindkey", "private_key",
-}
-SECRET_URL_RE = re.compile(
-    r"(?i)[?&](?:token|access_token|api[_-]?key|secret|password)="
-)
+from security import unsafe_reason
 
 
 TEMPLATE = r"""
@@ -162,6 +155,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     {% if change.selectable %}
     <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}">
     <input type="hidden" name="preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+      <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
     <span class="counts">{{ change.added }} added · {{ change.removed }} removed</span>
@@ -303,25 +297,6 @@ def load_bases():
     return dashboards if isinstance(dashboards, dict) else {}
 
 
-def unsafe_reason(value, path="$"):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            normalized = str(key).lower().replace("-", "_")
-            if normalized in SENSITIVE_KEYS and child not in (None, "", False):
-                return f"Sensitive field detected: {path}.{key}"
-            reason = unsafe_reason(child, f"{path}.{key}")
-            if reason:
-                return reason
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            reason = unsafe_reason(child, f"{path}[{index}]")
-            if reason:
-                return reason
-    elif isinstance(value, str) and SECRET_URL_RE.search(value):
-        return f"Credential-like URL detected at {path}"
-    return None
-
-
 def dashboard_url_path(relative):
     stem = Path(relative).stem
     if stem in {"lovelace", "dashboard-lovelace"}:
@@ -450,6 +425,7 @@ def collect_changes():
             "current": current,
             "base": base,
             "preview_ha_hash": digest(current),
+            "preview_desired_hash": digest(github),
             "status": status,
             "css": css,
             "selectable": selectable,
@@ -504,9 +480,10 @@ def apply_selected():
         abort(400)
     try:
         previews = parse_preview_hashes(request.form.getlist("preview_hash"))
+        desired_previews = parse_preview_hashes(request.form.getlist("desired_hash"))
     except ValueError:
         abort(400)
-    if any(relative not in previews for relative in selected):
+    if any(relative not in previews or relative not in desired_previews for relative in selected):
         abort(400)
 
     results = []
@@ -517,13 +494,12 @@ def apply_selected():
             fresh = {change["relative"]: change for change in collect_changes()}
             for relative in selected:
                 change = fresh.get(relative)
-                if change and not matches_preview(
-                    change["current"], previews[relative]
-                ):
+                if change and (not matches_preview(change["current"], previews[relative])
+                               or not matches_preview(change["github"], desired_previews[relative])):
                     results.append({
                         "ok": False,
                         "message": (
-                            f"{relative}: HA changed since preview. "
+                            f"{relative}: HA or Git desired changed since preview. "
                             "Refresh and review the new diff before Apply."
                         ),
                     })
@@ -534,6 +510,9 @@ def apply_selected():
                         "ok": False,
                         "message": f"{relative}: blocked by fresh conflict-check ({status}).",
                     })
+                    continue
+                if not matches_preview(ha_dashboard_config(relative), previews[relative]):
+                    results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
                     continue
                 save_dashboard(relative, change["github"])
                 verified = ha_dashboard_config(relative)

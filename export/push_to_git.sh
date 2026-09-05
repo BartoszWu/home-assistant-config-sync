@@ -46,18 +46,8 @@ mkdir -p \
     "$WORKDIR/docs" \
     "$WORKDIR/config"
 
-cp /export/entities.json "$WORKDIR/inventory/entities.json"
-cp /export/states.json "$WORKDIR/inventory/states.json"
-cp /export/ENTITIES.md "$WORKDIR/docs/ENTITIES.md"
-cp /export/DEVICES.md "$WORKDIR/docs/DEVICES.md"
-cp /export/STATES.md "$WORKDIR/docs/STATES.md"
-
-python3 /sync_dashboards.py "$WORKDIR" "$CURRENT_DASHBOARDS"
-
-# Managed config remains snapshot-only in this release. Apply is still disabled
-# for automations, scripts and scenes.
-rm -rf "$WORKDIR/config/storage"
-cp -a /export/config/storage "$WORKDIR/config/storage"
+python3 /export_status.py "$WORKDIR"
+python3 /validate_export.py "$WORKDIR"
 
 cd "$WORKDIR"
 
@@ -65,17 +55,14 @@ git config user.name "Home Assistant Exporter"
 git config user.email "home-assistant-exporter@localhost"
 
 # Explicit allowlist. Never use a repository-wide `git add .` here.
-git add -- \
-    inventory/entities.json \
-    inventory/states.json \
-    docs/ENTITIES.md \
-    docs/DEVICES.md \
-    docs/STATES.md
-
-git add -A -- \
-    dashboards \
-    state/dashboard-bases.json \
-    config/storage
+for path in \
+    inventory/entities.json inventory/states.json inventory/dashboards.json \
+    inventory/export-status.json docs/ENTITIES.md docs/DEVICES.md docs/STATES.md \
+    dashboards state/dashboard-bases.json config/storage; do
+    if [[ -e "$path" ]] || git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+        git add -A -- "$path"
+    fi
+done
 
 if git diff --cached --quiet; then
     echo "✅ HA export unchanged - nothing to commit."

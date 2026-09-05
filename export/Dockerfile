@@ -16,8 +16,12 @@ RUN apk add --no-cache \
         --break-system-packages \
         "websockets==15.0.1"
 
+COPY security.py /security.py
 COPY run.sh /run.sh
 COPY exporter.py /exporter.py
+COPY inventory.py /inventory.py
+COPY export_status.py /export_status.py
+COPY validate_export.py /validate_export.py
 COPY runtime_inventory.py /runtime_inventory.py
 COPY dashboard_exporter.py /dashboard_exporter.py
 COPY managed_config_exporter.py /managed_config_exporter.py

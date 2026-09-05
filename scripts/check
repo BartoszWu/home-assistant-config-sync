@@ -90,6 +90,8 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+if (root / "export/security.py").read_bytes() != (root / "import/security.py").read_bytes():
+    raise SystemExit("Security build-context mirrors differ")
 
 for path in root.rglob("*.json"):
     if ".git" not in path.parts:
