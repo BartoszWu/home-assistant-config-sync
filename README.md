@@ -249,3 +249,11 @@ a future cache should be outside Git, timestamped with source/completeness, use
 per-domain allowlists and refresh through authenticated HA access on each machine.
 Do not treat copying a cache or Git pull as live acquisition. No broad state
 snapshot, history, secret or additional runtime cache is introduced in this stage.
+
+## Structural analysis (Export 0.7.0)
+
+The existing Export now generates semantic inventory changes, a static dependency
+report, explainable InfluxDB review candidates, and a small agent summary. User
+InfluxDB decisions live in one private JSON policy; no integration is configured.
+See [Stage 2 contract and offline commands](STAGE2.md) for completeness, baseline,
+revision-aware notifications, candidate review, and runtime-only no-commit behavior.

@@ -58,13 +58,17 @@ git config user.email "home-assistant-exporter@localhost"
 for path in \
     inventory/entities.json inventory/states.json inventory/dashboards.json \
     inventory/export-status.json docs/ENTITIES.md docs/DEVICES.md docs/STATES.md \
+    inventory/changes.json inventory/dependencies.json inventory/influxdb-candidates.json \
+    inventory/summary.json inventory/analysis-state.json policy/influxdb.json \
+    docs/CHANGES.md docs/DEPENDENCIES.md docs/INFLUXDB-CANDIDATES.md \
     dashboards state/dashboard-bases.json config/storage; do
     if [[ -e "$path" ]] || git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
         git add -A -- "$path"
     fi
 done
 
-if git diff --cached --quiet; then
+# Runtime appliance snapshots remain available, but cannot alone create a commit.
+if git diff --cached --quiet -- . ':!inventory/states.json' ':!docs/STATES.md'; then
     echo "✅ HA export unchanged - nothing to commit."
     exit 0
 fi

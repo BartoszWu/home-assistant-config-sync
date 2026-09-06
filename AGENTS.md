@@ -250,3 +250,10 @@ As of 2026-08-22:
 - The automation also listens for `ha_config_sync_import_applied`, which Import fires once after a verified Apply.
 
 Verify live Home Assistant state before changing installation-specific IDs or automation configuration.
+
+## Stage 2 analysis contract
+
+Export's post-sanitization analysis and offline commands are documented in
+`STAGE2.md`. Preserve the last significant diff, complete baseline, entity lifetime
+ledger and user decisions. Notification acknowledgements remain local/gitignored;
+runtime appliance values alone must not create an export commit.

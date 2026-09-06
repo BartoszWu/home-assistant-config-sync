@@ -37,6 +37,8 @@ def inventory_values(value):
 
 
 def validate(repo):
+    from analysis_reports import validate_analysis
+    validate_analysis(repo)
     inventory = repo / 'inventory/entities.json'
     if inventory.exists():
         payload = json.loads(inventory.read_text())

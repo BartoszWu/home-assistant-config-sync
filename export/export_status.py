@@ -63,6 +63,8 @@ def publish_managed(repo, source):
 
 def publish(repo, source=Path('/export'), dashboards=Path('/tmp/ha-current/dashboards')):
     status = load_json(source / 'export-status.json')
+    previous_path = repo / 'inventory/entities.json'
+    previous_inventory = load_json(previous_path) if previous_path.exists() else None
     sections = status['sections']
     if sections['inventory']['complete']:
         canonical = load_json(source / 'entities.json')
@@ -111,7 +113,17 @@ def publish(repo, source=Path('/export'), dashboards=Path('/tmp/ha-current/dashb
         sections['dashboards']['statuses'] = sorted({x['status'] for x in manifest['dashboards']} | {manifest['resources_status']} | {x['status'] for x in manifest.get('scope_exclusions', [])})
     else:
         sections['dashboards']['retained_previous'] = True
-    write_json(repo / 'inventory/export-status.json', status)
+    prior_status_path = repo / 'inventory/export-status.json'
+    prior_status = load_json(prior_status_path) if prior_status_path.exists() else {}
+    if prior_status.get('sections') == status['sections'] and 'observed_at' in prior_status:
+        # Date of last status transition; successful executions remain in App logs.
+        status['observed_at'] = prior_status['observed_at']
+    status['observation_semantics'] = 'observed_at tracks last published section-status transition; execution freshness is in App logs'
+    write_json(prior_status_path, status)
+    if (repo / 'inventory/entities.json').exists() and load_json(repo / 'inventory/entities.json').get('schema_version') == 3:
+        from analyze import analyze
+        result = analyze(repo, previous_inventory)
+        print('Semantic analysis: ' + result['status'] + '; structural_changes=' + str(result['structural_changes']))
 
 
 if __name__ == '__main__':

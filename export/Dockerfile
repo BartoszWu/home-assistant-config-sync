@@ -20,6 +20,11 @@ COPY security.py /security.py
 COPY run.sh /run.sh
 COPY exporter.py /exporter.py
 COPY inventory.py /inventory.py
+COPY semantic.py /semantic.py
+COPY dependencies.py /dependencies.py
+COPY influx_candidates.py /influx_candidates.py
+COPY analysis_reports.py /analysis_reports.py
+COPY analyze.py /analyze.py
 COPY export_status.py /export_status.py
 COPY validate_export.py /validate_export.py
 COPY runtime_inventory.py /runtime_inventory.py
