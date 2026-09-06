@@ -27,6 +27,12 @@ When both projects are needed, open
 its root `AGENTS.md` for task routing. Dashboard and home-data changes belong in
 the sibling `home-assistant-config` repository, not in this repository.
 
+For HA project tasks, use the workspace's
+[home-assistant-project skill](../.agents/skills/home-assistant-project/SKILL.md).
+Open the parent workspace for automatic discovery; in a standalone checkout,
+read that file directly if available. These instructions retain the App-specific
+engineering and security invariants.
+
 ## Repository structure
 
 ```text
