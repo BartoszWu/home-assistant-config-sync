@@ -28,7 +28,11 @@ ASSIGNED_SECRET_RE = re.compile(
     r'authorization|serial(?:[ _-]?number)?|user[ _-]?id|bindkey)\b\s*[:=]')
 BEARER_RE = re.compile(r'(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]+')
 CREDENTIAL_RE = re.compile(r'(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)')
-TOKEN_RE = re.compile(r'(?<![\w.])(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_+/=-]{48,})(?![\w.])')
+# Omit '/' from the opaque-token alphabet: it is valid in base64, but also
+# forms long Lovelace navigation_path values such as
+# /dashboard-temperatura/pokoj-michasia-90dni-archiwum. Slash-bearing secrets
+# remain covered by CREDENTIAL_RE, BEARER_RE, and ASSIGNED_SECRET_RE.
+TOKEN_RE = re.compile(r'(?<![\w.])(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_+=-]{48,})(?![\w.])')
 ENTITY_RE = re.compile(r'^[a-z_][a-z0-9_]*\.[a-z0-9_]{1,240}$')
 INTERNAL_ID_RE = re.compile(r'^[a-f0-9]{32}$')
 
