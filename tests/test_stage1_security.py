@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'import'), str(ROOT / 'export')]
-import app
+from security import unsafe_reason
 from runtime_inventory import safe_runtime_text
 
 
@@ -32,7 +32,7 @@ class SecurityRegressionTests(unittest.TestCase):
     def test_import_rejects_audited_leaks_recursively(self):
         for sample in unsafe_samples():
             with self.subTest(sample_keys=list(sample)):
-                self.assertIsNotNone(app.unsafe_reason(sample))
+                self.assertIsNotNone(unsafe_reason(sample))
 
     def test_runtime_redacts_audited_text_leaks(self):
         for sample in unsafe_samples():
@@ -41,9 +41,41 @@ class SecurityRegressionTests(unittest.TestCase):
                 with self.subTest(value_type='synthetic text'):
                     self.assertNotEqual(safe_runtime_text(value), value)
 
+    def test_long_lovelace_navigation_paths_are_not_opaque_tokens(self):
+        # Long hyphenated dashboard paths share characters with base64-ish
+        # tokens once '/' is allowed; they must not block Import Apply.
+        for path in (
+            '/dashboard-temperatura/pokoj-michasia-90dni-archiwum',
+            '/dashboard-temperatura/pokoj-adasia-90dni-archiwum',
+            '/dashboard-temperatura/hol-parter-90dni-archiwum',
+            {
+                'tap_action': {
+                    'action': 'navigate',
+                    'navigation_path': '/dashboard-temperatura/pokoj-michasia-90dni-archiwum',
+                }
+            },
+        ):
+            with self.subTest(path=path if isinstance(path, str) else 'nested'):
+                self.assertIsNone(unsafe_reason(path))
+
+    def test_opaque_tokens_without_slash_still_rejected(self):
+        token = 'A' * 48
+        self.assertEqual(unsafe_reason({'text': token}), 'credential-like identifier')
+
 
 class ApplyPreviewRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import app as import_app
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                "Install Import's Flask/websocket-client dependencies for Apply tests"
+            ) from exc
+        cls.app_module = import_app
+
     def setUp(self):
+        app = self.app_module
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.repo = Path(self.tmp.name)
@@ -65,10 +97,12 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def submit(self):
+        app = self.app_module
         return app.app.test_client().post('/apply', data=self.form,
             environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
 
     def test_changed_git_after_preview_blocks_apply(self):
+        app = self.app_module
         self.path.write_text(json.dumps({'views': [{'title': 'Unreviewed'}]}))
         with patch.object(app, 'save_dashboard') as save, patch.object(app, 'request_export') as export:
             self.submit()
@@ -76,12 +110,14 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             export.assert_not_called()
 
     def test_changed_ha_after_preview_blocks_apply(self):
+        app = self.app_module
         self.live = {'views': [{'title': 'Changed in HA'}]}
         with patch.object(app, 'save_dashboard') as save:
             self.submit()
             save.assert_not_called()
 
     def test_unchanged_preview_applies_and_verifies(self):
+        app = self.app_module
         def save(_, value):
             self.live = copy.deepcopy(value)
         with patch.object(app, 'save_dashboard', side_effect=save) as saved, patch.object(app, 'request_export') as export:
@@ -90,6 +126,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             export.assert_called_once_with(['test.json'])
 
     def test_missing_desired_hash_fails_closed(self):
+        app = self.app_module
         self.form.pop('desired_hash')
         with patch.object(app, 'save_dashboard') as save:
             self.assertEqual(self.submit().status_code, 400)
