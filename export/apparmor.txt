@@ -1,0 +1,100 @@
+#include <tunables/global>
+
+# Custom AppArmor profile for HA Config Sync — Export.
+# Mount: homeassistant_config → /homeassistant (RO). Application code only
+# reads LIVE dashboard provenance under /homeassistant/.config-sync/.
+#
+# Profile name must match config.yaml slug. Supervisor loads export/apparmor.txt.
+#
+# Deny mode letters (apparmor.d(5)):
+#   r read, w write, m executable mmap, l hard link, k lock, x execute (bare x
+#   only valid with deny). Append `a` conflicts with `w`, so sensitive paths get
+#   a second deny rule for `a`.
+profile ha_config_sync_export flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+
+  signal,
+  network,
+  file,
+
+  # S6 / Bashio / runtime
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/local/bin/** ix,
+  /sbin/** ix,
+  /usr/sbin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /dev/tty rw,
+  /usr/lib/bashio/** ix,
+  /tmp/** rwk,
+  /data/** rwk,
+  /export/** rwk,
+
+  # App code and Python deps
+  /security.py r,
+  /export_status.py r,
+  /exporter.py r,
+  /inventory.py r,
+  /semantic.py r,
+  /dependencies.py r,
+  /influx_candidates.py r,
+  /analysis_reports.py r,
+  /analyze.py r,
+  /validate_export.py r,
+  /runtime_inventory.py r,
+  /dashboard_exporter.py r,
+  /dashboard_manifest.py r,
+  /deployment_provenance.py r,
+  /managed_config_exporter.py r,
+  /sync_dashboards.py r,
+  /push_to_git.sh rix,
+  /run.sh rix,
+  /usr/lib/python*/** mr,
+  /usr/local/lib/python*/** mr,
+  /usr/lib/libpython* mr,
+
+  # GitHub deploy key material (addon_config → /export)
+  /export/ssh/** r,
+
+  /usr/bin/git ix,
+  /usr/bin/ssh ix,
+  /usr/bin/ssh-keyscan ix,
+  /etc/ssl/certs/** r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/nsswitch.conf r,
+  /etc/resolv.conf r,
+  /etc/hosts r,
+
+  # HA config mount: read LIVE provenance only.
+  /homeassistant/ r,
+  /homeassistant/.config-sync/ r,
+  /homeassistant/.config-sync/live-dashboards.json r,
+  /homeassistant/.config-sync/guard-initialized.json r,
+
+  deny /homeassistant/.config-sync/** w,
+  deny /homeassistant/.config-sync/** a,
+
+  deny /homeassistant/.storage/ rwmlkx,
+  deny /homeassistant/.storage/ a,
+  deny /homeassistant/.storage/** rwmlkx,
+  deny /homeassistant/.storage/** a,
+
+  deny /homeassistant/secrets.yaml rwmlkx,
+  deny /homeassistant/secrets.yaml a,
+  deny /homeassistant/configuration.yaml rwmlkx,
+  deny /homeassistant/configuration.yaml a,
+
+  deny /homeassistant/custom_components/ rwmlkx,
+  deny /homeassistant/custom_components/ a,
+  deny /homeassistant/custom_components/** rwmlkx,
+  deny /homeassistant/custom_components/** a,
+}

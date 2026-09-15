@@ -5,6 +5,7 @@ import re
 
 BOOTSTRAP_STATUS = "READY TO APPLY — NEW DASHBOARD"
 MISSING_BASE_STATUS = "IN SYNC — BASE NOT INITIALIZED"
+NONCANONICAL_STATUS = "LIVE FROM FEATURE"
 APPLYABLE_STATUSES = {"READY TO APPLY", BOOTSTRAP_STATUS}
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -84,6 +85,61 @@ def is_empty_dashboard(config):
     if not isinstance(section, dict) or set(section) - SECTION_KEYS:
         return False
     return _contains_only_empty_heading_cards(section.get("cards"))
+
+
+def classify_with_provenance(
+    github,
+    current,
+    base,
+    *,
+    live_hash=None,
+    reviewing_canonical=False,
+    provenance=None,
+    unsafe=None,
+):
+    """Three-way classify, using feature deployment hash instead of Git BASE when LIVE is non-canonical."""
+    if provenance is not None and not getattr(provenance, "canonical", True):
+        applied_hash = getattr(provenance, "content_hash", None)
+        github_hash = digest(github)
+        current_hash = live_hash or digest(current)
+        source_ref = getattr(provenance, "source_ref", "feature")
+        short = provenance.short_sha() if hasattr(provenance, "short_sha") else "?"
+        if reviewing_canonical:
+            if github_hash == current_hash:
+                return (
+                    "SAME",
+                    "same",
+                    False,
+                    (
+                        f"LIVE matches {getattr(provenance, 'canonical_branch', 'main')} "
+                        "and can be marked canonical."
+                    ),
+                    True,
+                )
+            return (
+                NONCANONICAL_STATUS,
+                "changed",
+                False,
+                (
+                    f"LIVE is deployed from {source_ref} @ {short}. "
+                    "Canonical main sync is disabled until LIVE matches main."
+                ),
+                False,
+            )
+        effective_base = applied_hash if isinstance(applied_hash, str) else base
+        status, css, selectable, reason = classify(
+            github, current, effective_base, unsafe=unsafe
+        )
+        if status == "CHANGED IN HA":
+            reason = (
+                f"HA changed after the {source_ref} @{short} deployment. "
+                "Export will not publish this dashboard to main."
+            )
+        elif status == "SAME":
+            reason = f"Git source matches LIVE ({source_ref} @ {short})."
+        return status, css, selectable, reason, False
+    status, css, selectable, reason = classify(github, current, base, unsafe=unsafe)
+    return status, css, selectable, reason, False
 
 
 def classify(github, current, base, unsafe=None):

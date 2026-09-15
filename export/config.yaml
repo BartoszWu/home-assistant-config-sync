@@ -1,6 +1,6 @@
 name: "HA Config Sync — Export"
 description: "Export sanitized Home Assistant configuration to GitHub"
-version: "0.7.1"
+version: "0.8.1"
 slug: "ha_config_sync_export"
 url: "https://github.com/BartoszWu/home-assistant-config-sync"
 
@@ -11,6 +11,7 @@ startup: once
 boot: manual_only
 init: false
 stage: experimental
+apparmor: true
 
 homeassistant_api: true
 
@@ -18,5 +19,8 @@ map:
   - type: addon_config
     read_only: false
     path: /export
+  - type: homeassistant_config
+    read_only: true
+    path: /homeassistant
 
 schema: false

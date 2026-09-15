@@ -61,6 +61,8 @@ FORBIDDEN_PARTS = frozenset({
     ".cloud",
     "backups",
     ".ssh",
+    ".config-sync",
+    ".config-sync-preview",
 })
 FORBIDDEN_SUFFIXES = (".db", ".db-shm", ".db-wal", ".sqlite", ".sqlite3")
 

@@ -5,6 +5,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from deployment_provenance import dashboard_sync_decision, empty_store
+
 
 STATE_RELATIVE = Path("state/dashboard-bases.json")
 
@@ -60,7 +62,7 @@ def base_hash(entry):
     return None
 
 
-def sync(repo, current_root):
+def sync(repo, current_root, provenance=None):
     current_files = sorted(
         path for path in current_root.glob("*.json")
         if path.name != "index.json"
@@ -72,6 +74,8 @@ def sync(repo, current_root):
     destination_root.mkdir(parents=True, exist_ok=True)
     state = load_state(repo)
     bases = state["dashboards"]
+    store = provenance if provenance is not None else empty_store()
+    outcomes = {}
 
     for current_path in current_files:
         relative = current_path.name
@@ -79,11 +83,20 @@ def sync(repo, current_root):
         current = load_json(current_path)
         current_hash = digest(current)
         previous_base = base_hash(bases.get(relative))
+        allowed, skip_log = dashboard_sync_decision(relative, store)
+        if not allowed:
+            print(skip_log)
+            outcomes[relative] = {
+                "action": "SKIPPED",
+                "reason": skip_log,
+            }
+            continue
 
         if not destination.exists():
             write_json(destination, current)
             bases[relative] = {"sha256": current_hash}
             print(f"MIGRATED {relative}: GitHub now matches HA current")
+            outcomes[relative] = {"action": "MIGRATED"}
             continue
 
         github = load_json(destination)
@@ -92,6 +105,7 @@ def sync(repo, current_root):
         if github_hash == current_hash:
             bases[relative] = {"sha256": current_hash}
             print(f"SAME {relative}")
+            outcomes[relative] = {"action": "SAME"}
             continue
 
         if previous_base is None:
@@ -99,6 +113,7 @@ def sync(repo, current_root):
                 f"CONFLICT {relative}: no exported base and GitHub differs from HA; "
                 "left untouched"
             )
+            outcomes[relative] = {"action": "CONFLICT"}
             continue
 
         github_changed = github_hash != previous_base
@@ -106,6 +121,7 @@ def sync(repo, current_root):
 
         if github_changed and not ha_changed:
             print(f"PENDING GITHUB CHANGE {relative}: left GitHub file untouched")
+            outcomes[relative] = {"action": "PENDING"}
             continue
 
         if github_changed and ha_changed:
@@ -113,12 +129,14 @@ def sync(repo, current_root):
                 f"CONFLICT {relative}: both GitHub and HA changed from the base; "
                 "left untouched"
             )
+            outcomes[relative] = {"action": "CONFLICT"}
             continue
 
         if not github_changed and ha_changed:
             write_json(destination, current)
             bases[relative] = {"sha256": current_hash}
             print(f"HA CHANGE {relative}: exported to GitHub")
+            outcomes[relative] = {"action": "HA_CHANGE"}
             continue
 
         raise RuntimeError(f"Unexpected sync state for {relative}")
@@ -140,6 +158,8 @@ def sync(repo, current_root):
                 f"NOTICE {destination.name}: not returned by HA; "
                 "left untouched (deletion is never automatic)"
             )
+
+    return outcomes
 
 
 def main():
