@@ -24,6 +24,7 @@ COPY dashboard_logic.py /dashboard_logic.py
 COPY diff_view.py /diff_view.py
 COPY review_warnings.py /review_warnings.py
 COPY visual_preview.py /visual_preview.py
+COPY git_source.py /git_source.py
 COPY managed_files.py /managed_files.py
 COPY managed_files.yaml /managed_files.yaml
 COPY static /static

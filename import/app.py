@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import threading
 from pathlib import Path, PurePosixPath
@@ -25,11 +24,21 @@ from diff_view import (
     json_lines,
     summarize_changed_files,
 )
+from git_source import (
+    DEFAULT_SOURCE_REF,
+    InvalidSourceRef,
+    SourceRevision,
+    checkout_source,
+    parse_requested_source,
+)
 from managed_files import (
     apply_managed_files,
     collect_managed_changes,
+    discover_managed_entries,
     initialize_missing_bases,
     load_policy,
+    record_last_apply,
+    validate_policy_path,
 )
 from review_warnings import format_scan_warnings
 from visual_preview import prepare_preview
@@ -40,19 +49,24 @@ VISUAL_PREVIEW_ASSET = Path(__file__).with_name("static") / "visual-preview.mjs"
 VISUAL_PREVIEW_VERSION = hashlib.sha256(VISUAL_PREVIEW_ASSET.read_bytes()).hexdigest()[:12]
 
 REPO = "ssh://git@ssh.github.com:443/BartoszWu/home-assistant-config.git"
-BRANCH = "main"
+DEFAULT_BRANCH = DEFAULT_SOURCE_REF
 KEY = Path("/review/ssh/github_ed25519")
 KNOWN_HOSTS = Path("/review/ssh/known_hosts_443")
 WORKDIR = Path("/tmp/home-assistant-config")
 STATE_FILE = Path("state/dashboard-bases.json")
 IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
+MAX_DASHBOARD_SELECTED = 20
+MAX_MANAGED_SELECTED = 50
 
 from security import unsafe_reason
 
 try:
-    HA_CONFIG_ROOT, MANAGED_ENTRIES = load_policy()
+    MANAGED_POLICY = load_policy()
+    HA_CONFIG_ROOT = MANAGED_POLICY.ha_root
+    MANAGED_ENTRIES = list(MANAGED_POLICY.exact)
 except Exception as policy_error:  # Fail closed at import time with a clear message.
+    MANAGED_POLICY = None
     HA_CONFIG_ROOT, MANAGED_ENTRIES = Path("/homeassistant"), []
     MANAGED_POLICY_ERROR = str(policy_error)
 else:
@@ -132,6 +146,11 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 [hidden] { display:none !important; }
 .apply-progress { display:none; align-items:center; gap:9px; margin-right:12px; padding:9px 12px; border-radius:8px; background:#e3f2fd; color:#174f78; font-weight:650; }
 .apply-progress.visible { display:flex; }
+.source-form { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:end; }
+.source-form label { display:flex; flex-direction:column; gap:4px; font-size:13px; font-weight:650; }
+.source-form select, .source-form input[type=text] { padding:8px 10px; border-radius:8px; border:1px solid #d9dde1; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:220px; background:var(--card-background); color:var(--text-color); }
+.source-resolved { font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
+.stale { background:var(--error-background); color:var(--error-text); padding:10px 12px; border-radius:8px; }
 .spinner { width:16px; height:16px; border:3px solid #8bcdf1; border-top-color:#0277bd; border-radius:50%; animation:spin .75s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 @media (prefers-color-scheme:dark) {
@@ -163,14 +182,50 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <body><main>
 <header>
   <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
-  <form method="get"><button id="refresh-button" type="submit">Refresh GitHub</button></form>
+  <form method="get">
+    {% if git_source and git_source.source_kind == 'commit' %}
+    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
+    {% elif git_source %}
+    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
+    {% endif %}
+    <button id="refresh-button" type="submit">Refresh GitHub</button>
+  </form>
 </header>
+
+<section class="card" id="source">
+  <h2 style="margin-top:0">Source</h2>
+  <p class="small">Default is <code>main</code>. Choosing a feature branch does not merge, does not push, and does not change the saved default. Preview and Apply use one pinned commit SHA.</p>
+  <form method="get" class="source-form">
+    <label>Branch
+      <select name="source" aria-label="Source branch">
+        {% for name in (git_source.available_branches if git_source else ['main']) %}
+        <option value="{{ name }}" {% if git_source and git_source.source_kind == 'branch' and git_source.source_ref == name %}selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Commit SHA (optional)
+      <input type="text" name="source_sha" value="{{ git_source.source_ref if git_source and git_source.source_kind == 'commit' else '' }}" pattern="[0-9a-f]{40}" placeholder="40-character SHA" spellcheck="false" autocomplete="off" aria-label="Optional commit SHA">
+    </label>
+    <button type="submit">Refresh source</button>
+  </form>
+  <p class="source-resolved" style="margin:12px 0 0">
+    Source: <code>{{ git_source.source_ref if git_source else 'main' }}</code>
+    · Resolved commit: <code>{{ git_source.short_sha if git_source else '-' }}</code>
+    {% if git_source and git_source.commit_sha %}<span class="small">({{ git_source.commit_sha }})</span>{% endif %}
+  </p>
+  {% if git_source and git_source.stale %}
+  <p class="stale"><strong>SOURCE UPDATED — REFRESH REVIEW</strong><br>
+    Branch HEAD changed:
+    reviewed <code>{{ git_source.reviewed_sha[:7] if git_source.reviewed_sha else '?' }}</code>
+    · current <code>{{ git_source.short_sha }}</code>
+    Apply was not performed.</p>
+  {% endif %}
+</section>
 
 {% if error %}<div class="card error"><strong>Error:</strong> {{ error }}</div>{% else %}
 <div class="card meta">
   <strong>Repository:</strong><span>BartoszWu/home-assistant-config</span>
-  <strong>Branch:</strong><span>{{ branch }}</span>
-  <strong>Commit:</strong><span>{{ commit }}</span>
+  <strong>Source:</strong><span>{{ git_source.source_ref }} @ {{ git_source.short_sha }}</span>
   <strong>Base state:</strong><span>state/dashboard-bases.json (dashboards) · /data/managed-file-bases.json (managed files)</span>
 </div>
 
@@ -187,11 +242,25 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   <h3 style="margin-top:0">Base initialization needed</h3>
   {% if has_missing_base %}
   <p>Dashboard: GitHub and Home Assistant already match, but no exported base hash exists.</p>
-  <form method="post" action="export" style="margin-bottom:12px"><button type="submit">Request Export to initialize dashboard base</button></form>
+  <form method="post" action="export" style="margin-bottom:12px">
+    {% if git_source and git_source.source_kind == 'commit' %}
+    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
+    {% elif git_source %}
+    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
+    {% endif %}
+    <button type="submit">Request Export to initialize dashboard base</button>
+  </form>
   {% endif %}
   {% if has_managed_missing_base %}
   <p>Managed files: GitHub and HA already match, but no Import base hash exists.</p>
-  <form method="post" action="managed-base"><button type="submit">Initialize managed-file bases</button></form>
+  <form method="post" action="managed-base">
+    {% if git_source and git_source.source_kind == 'commit' %}
+    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
+    {% elif git_source %}
+    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
+    {% endif %}
+    <button type="submit">Initialize managed-file bases</button>
+  </form>
   {% endif %}
 </section>
 {% endif %}
@@ -208,7 +277,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
       <col class="ln">
       <col>
     </colgroup>
-    <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
+    <thead><tr><th colspan="2">HA current</th><th colspan="2">Git {{ git_source.short_sha if git_source else 'source' }}</th></tr></thead>
     <tbody>
     {% for block in change.diff.blocks %}
       {% if block.type == "gap" %}
@@ -240,7 +309,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
-  <div class="small">Dashboard · dashboards/{{ change.relative }}</div>
+  <div class="small">Dashboard · dashboards/{{ change.relative }} · source {{ git_source.short_sha if git_source else '-' }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
   <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
@@ -286,7 +355,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
-  <div class="small">Profile · {{ change.profile }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
+  <div class="small">Profile · {{ change.profile }} · source {{ git_source.short_sha if git_source else '-' }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
   <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
@@ -307,6 +376,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {%- endmacro %}
 
 <form id="apply-form" method="post" action="apply">
+{% if git_source %}
+<input type="hidden" name="source" value="{{ git_source.source_ref if git_source.source_kind == 'branch' else 'main' }}">
+{% if git_source.source_kind == 'commit' %}
+<input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
+{% endif %}
+<input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">
+{% endif %}
 {% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
 {% if file_summary.count %}
 <nav class="card files-changed" aria-label="Changed files">
@@ -376,6 +452,14 @@ if (form) {
     window.setTimeout(() => form.submit(), 50);
   });
 }
+const sourceSelect = document.querySelector('#source select[name="source"]');
+if (sourceSelect) {
+  sourceSelect.addEventListener('change', event => {
+    const sha = event.target.form.querySelector('input[name="source_sha"]');
+    if (sha) sha.value = '';
+    event.target.form.submit();
+  });
+}
 </script>
 <script type="module" src="static/visual-preview.mjs?v={{ visual_preview_version }}"></script>
 </body></html>
@@ -407,23 +491,34 @@ def run(command, cwd=None):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=30,
+        timeout=60,
         check=True,
     ).stdout.strip()
 
 
-def refresh_repo():
+def refresh_repo(source_ref=None, pin_sha=None):
     with REPO_LOCK:
         if not KEY.exists():
             raise RuntimeError("Read-only GitHub deploy key is not configured.")
         if not KNOWN_HOSTS.exists():
             raise RuntimeError("GitHub known_hosts file is not configured.")
-        shutil.rmtree(WORKDIR, ignore_errors=True)
-        run([
-            "git", "clone", "--depth", "1", "--branch", BRANCH,
-            REPO, str(WORKDIR),
-        ])
-        return run(["git", "rev-parse", "--short", "HEAD"], cwd=WORKDIR)
+        return checkout_source(
+            repo=REPO,
+            workdir=WORKDIR,
+            runner=run,
+            source_ref=source_ref or DEFAULT_BRANCH,
+            pin_sha=pin_sha,
+        )
+
+
+def requested_source_from_request():
+    try:
+        return parse_requested_source(
+            request.values.get("source"),
+            request.values.get("source_sha"),
+        )
+    except InvalidSourceRef as error:
+        raise InvalidSourceRef(str(error)) from error
 
 
 def load_json(path):
@@ -535,7 +630,7 @@ def valid_relative(value):
     return len(path.parts) == 1 and path.suffix == ".json" and ".." not in path.parts
 
 
-def collect_changes():
+def collect_changes(commit_sha=""):
     root = WORKDIR / "dashboards"
     bases = load_bases()
     changes = []
@@ -568,6 +663,7 @@ def collect_changes():
             "selectable": selectable,
             "reason": reason,
             "warnings": warnings,
+            "source_sha": commit_sha,
             **dashboard_review_fields(relative, current, github),
         })
     return changes
@@ -581,28 +677,85 @@ def public_managed_change(change):
     }
 
 
-def render_review(results=None):
+def managed_entries_for_revision():
+    if MANAGED_POLICY is None or MANAGED_POLICY_ERROR:
+        return []
+    return discover_managed_entries(WORKDIR, MANAGED_POLICY)
+
+
+def coerce_revision(value, requested_ref=DEFAULT_BRANCH) -> SourceRevision:
+    if isinstance(value, SourceRevision):
+        return value
+    if isinstance(value, str):
+        digest = value.lower()
+        if len(digest) == 40 and all(char in "0123456789abcdef" for char in digest):
+            sha = digest
+            short = sha[:7]
+        else:
+            sha = "0" * 40
+            short = value[:32] or "-"
+        return SourceRevision(
+            source_ref=requested_ref,
+            source_kind="branch",
+            commit_sha=sha,
+            short_sha=short,
+            available_branches=(DEFAULT_BRANCH,),
+            branch_tip_sha=sha,
+            stale=False,
+        )
+    raise TypeError("Git source refresh returned an unexpected revision type.")
+
+
+def stale_source_message(revision: SourceRevision) -> str:
+    reviewed = (revision.reviewed_sha or "")[:7] or "?"
+    current = revision.short_sha or "?"
+    return (
+        "SOURCE UPDATED — REFRESH REVIEW. "
+        f"Branch HEAD changed: reviewed {reviewed}, current {current}. "
+        "Apply was not performed."
+    )
+
+
+def render_review(results=None, *, source=None, pin_sha=None):
     error = None
-    commit = "-"
     changes = []
     managed_changes = []
+    revision = source
     with REPO_LOCK:
         try:
-            commit = refresh_repo()
-            changes = collect_changes()
-            if MANAGED_ENTRIES and not MANAGED_POLICY_ERROR:
+            requested_ref, _kind = requested_source_from_request()
+            if revision is None:
+                revision = coerce_revision(
+                    refresh_repo(requested_ref, pin_sha=pin_sha),
+                    requested_ref,
+                )
+            else:
+                revision = coerce_revision(revision, requested_ref)
+            changes = collect_changes(revision.commit_sha)
+            entries = managed_entries_for_revision()
+            if entries and not MANAGED_POLICY_ERROR:
                 managed_changes, _bases = collect_managed_changes(
                     WORKDIR,
                     HA_CONFIG_ROOT,
-                    MANAGED_ENTRIES,
+                    entries,
                     unsafe_reason,
                     stage_frontend=True,
+                    commit_sha=revision.commit_sha,
                 )
                 managed_changes = [public_managed_change(item) for item in managed_changes]
+        except InvalidSourceRef as exception:
+            error = str(exception)
+            revision = revision if isinstance(revision, SourceRevision) else SourceRevision.fallback()
         except Exception as exception:
             error = str(exception)
-    has_ready = any(change["selectable"] for change in changes) or any(
-        change["selectable"] for change in managed_changes
+            if not isinstance(revision, SourceRevision):
+                revision = SourceRevision.fallback()
+    has_ready = (
+        not (revision and revision.stale)
+        and (
+            any(change["selectable"] for change in changes)
+            or any(change["selectable"] for change in managed_changes)
+        )
     )
     return render_template_string(
         TEMPLATE,
@@ -618,8 +771,8 @@ def render_review(results=None):
         file_summary=summarize_changed_files(changes, managed_changes),
         managed_policy_error=MANAGED_POLICY_ERROR,
         error=error,
-        commit=commit,
-        branch=BRANCH,
+        commit=revision.short_sha if revision else "-",
+        git_source=revision,
         has_ready=has_ready,
         has_missing_base=any(
             change["status"] == MISSING_BASE_STATUS for change in changes
@@ -644,17 +797,24 @@ def apply_selected():
     if not selected and not managed_selected:
         return render_review([{"ok": False, "message": "No READY item selected."}])
     if (
-        len(selected) > 20
+        len(selected) > MAX_DASHBOARD_SELECTED
         or len(set(selected)) != len(selected)
         or any(not valid_relative(value) for value in selected)
     ):
         abort(400)
-    allowed_managed = {entry.path for entry in MANAGED_ENTRIES}
     if (
-        len(managed_selected) > 20
+        len(managed_selected) > MAX_MANAGED_SELECTED
         or len(set(managed_selected)) != len(managed_selected)
-        or any(value not in allowed_managed for value in managed_selected)
     ):
+        abort(400)
+    try:
+        for value in managed_selected:
+            validate_policy_path(value)
+    except ValueError:
+        abort(400)
+
+    reviewed_sha = (request.form.get("reviewed_sha") or "").strip()
+    if not reviewed_sha:
         abort(400)
 
     previews = {}
@@ -662,6 +822,7 @@ def apply_selected():
     managed_previews = {}
     managed_desired = {}
     try:
+        requested_ref, _kind = requested_source_from_request()
         if selected:
             previews = parse_preview_hashes(request.form.getlist("preview_hash"))
             desired_previews = parse_preview_hashes(request.form.getlist("desired_hash"))
@@ -675,17 +836,43 @@ def apply_selected():
                 for relative in managed_selected
             ):
                 abort(400)
+    except InvalidSourceRef:
+        abort(400)
     except ValueError:
         abort(400)
 
     results = []
     applied = []
     managed_applied = []
+    revision = None
     with REPO_LOCK:
         try:
-            refresh_repo()
+            revision = coerce_revision(
+                refresh_repo(requested_ref, pin_sha=reviewed_sha),
+                requested_ref,
+            )
+            if revision.stale or revision.commit_sha != reviewed_sha:
+                revision = SourceRevision(
+                    source_ref=revision.source_ref,
+                    source_kind=revision.source_kind,
+                    commit_sha=revision.commit_sha,
+                    short_sha=revision.short_sha,
+                    available_branches=revision.available_branches,
+                    branch_tip_sha=revision.branch_tip_sha,
+                    stale=True,
+                    reviewed_sha=reviewed_sha,
+                )
+                results.append({"ok": False, "message": stale_source_message(revision)})
+                return render_review(results, source=revision)
+            entries = managed_entries_for_revision()
+            allowed_managed = {entry.path for entry in entries}
+            if any(value not in allowed_managed for value in managed_selected):
+                abort(400)
             if selected:
-                fresh = {change["relative"]: change for change in collect_changes()}
+                fresh = {
+                    change["relative"]: change
+                    for change in collect_changes(revision.commit_sha)
+                }
                 for relative in selected:
                     change = fresh.get(relative)
                     if change and (not matches_preview(change["current"], previews[relative])
@@ -731,12 +918,27 @@ def apply_selected():
                     managed_desired,
                     WORKDIR,
                     HA_CONFIG_ROOT,
-                    MANAGED_ENTRIES,
+                    entries,
                     unsafe_reason,
                     ha_ws_call,
                     token,
+                    source_ref=revision.source_ref,
+                    commit_sha=revision.commit_sha,
                 )
                 results.extend(managed_results)
+            if applied or managed_applied:
+                try:
+                    record_last_apply(
+                        source_ref=revision.source_ref,
+                        commit_sha=revision.commit_sha,
+                        dashboards=applied,
+                        managed_files=managed_applied,
+                    )
+                except OSError:
+                    results.append({
+                        "ok": True,
+                        "message": "Apply succeeded; last-apply metadata could not be stored.",
+                    })
         except Exception as exception:
             results.append({"ok": False, "message": f"Apply failed: {exception}"})
     if applied:
@@ -770,9 +972,10 @@ def managed_initialize_bases():
     results = []
     with REPO_LOCK:
         try:
-            refresh_repo()
+            requested_ref, _kind = requested_source_from_request()
+            refresh_repo(requested_ref)
             initialized = initialize_missing_bases(
-                WORKDIR, HA_CONFIG_ROOT, MANAGED_ENTRIES, unsafe_reason
+                WORKDIR, HA_CONFIG_ROOT, managed_entries_for_revision(), unsafe_reason
             )
             if initialized:
                 results.append({
@@ -798,10 +1001,11 @@ def export_missing_bases():
     missing = []
     with REPO_LOCK:
         try:
-            refresh_repo()
+            requested_ref, _kind = requested_source_from_request()
+            revision = coerce_revision(refresh_repo(requested_ref), requested_ref)
             missing = [
                 change["relative"]
-                for change in collect_changes()
+                for change in collect_changes(revision.commit_sha)
                 if change["status"] == MISSING_BASE_STATUS
             ]
             if missing:

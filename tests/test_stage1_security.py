@@ -10,6 +10,24 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'import'), str(ROOT / 'export')]
 from security import unsafe_reason
 from runtime_inventory import safe_runtime_text
+from git_source import SourceRevision
+
+
+REVIEW_SHA = "c" * 40
+
+
+def fake_revision(**kwargs):
+    sha = kwargs.get("commit_sha", REVIEW_SHA)
+    return SourceRevision(
+        source_ref=kwargs.get("source_ref", "main"),
+        source_kind=kwargs.get("source_kind", "branch"),
+        commit_sha=sha,
+        short_sha=sha[:7],
+        available_branches=("main",),
+        branch_tip_sha=kwargs.get("branch_tip_sha", sha),
+        stale=kwargs.get("stale", False),
+        reviewed_sha=kwargs.get("reviewed_sha"),
+    )
 
 
 def unsafe_samples():
@@ -89,9 +107,11 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             'dashboards': {'test.json': {'sha256': app.digest(self.live)}}}))
         self.form = {'selected': 'test.json',
                      'preview_hash': 'test.json:' + app.digest(self.live),
-                     'desired_hash': 'test.json:' + app.digest(self.desired)}
+                     'desired_hash': 'test.json:' + app.digest(self.desired),
+                     'source': 'main',
+                     'reviewed_sha': REVIEW_SHA}
         for p in [patch.object(app, 'WORKDIR', self.repo),
-                  patch.object(app, 'refresh_repo', return_value='fixture'),
+                  patch.object(app, 'refresh_repo', return_value=fake_revision()),
                   patch.object(app, 'ha_dashboard_config', side_effect=lambda _: copy.deepcopy(self.live))]:
             p.start()
             self.addCleanup(p.stop)
@@ -124,6 +144,25 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             self.submit()
             saved.assert_called_once_with('test.json', self.desired)
             export.assert_called_once_with(['test.json'])
+
+    def test_stale_source_refuses_new_tip(self):
+        app = self.app_module
+        moved = fake_revision(commit_sha="d" * 40, stale=True, reviewed_sha=REVIEW_SHA)
+        with patch.object(app, "refresh_repo", return_value=moved), \
+             patch.object(app, "save_dashboard") as save, \
+             patch.object(app, "request_export") as export:
+            response = self.submit()
+        html = response.get_data(as_text=True)
+        self.assertIn("SOURCE UPDATED", html)
+        save.assert_not_called()
+        export.assert_not_called()
+
+    def test_missing_reviewed_sha_fails_closed(self):
+        app = self.app_module
+        self.form.pop("reviewed_sha")
+        with patch.object(app, "save_dashboard") as save:
+            self.assertEqual(self.submit().status_code, 400)
+            save.assert_not_called()
 
     def test_missing_desired_hash_fails_closed(self):
         app = self.app_module
