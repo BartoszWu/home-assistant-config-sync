@@ -18,10 +18,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SCHEMA_VERSIONS = frozenset({1, 2})
 CANONICAL_BRANCH = "main"
 SOURCE_KIND_BRANCH = "branch"
 SOURCE_KIND_COMMIT = "commit"
+GUARD_LEGACY = "legacy"
+GUARD_READY = "ready"
+GUARD_UNAVAILABLE = "unavailable"
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$")
@@ -30,13 +34,17 @@ MANAGED_PATH_RE = re.compile(
     r"^(?:packages|www|custom_templates)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
 )
 
-# Import-local copy survives Import restarts even if www is later cleaned.
+# Import-local copy survives Import restarts even if the shared file is later cleaned.
 IMPORT_STATE_PATH = Path("/data/dashboard-provenance.json")
-# Shared with Export: already inside Import's allowed www/** tree; not Git desired-state.
-SHARED_STATE_PATH = Path("/homeassistant/www/.config-sync/live-dashboards.json")
-# Export caches the last valid shared snapshot so a later scheduled run still
-# skips after the shared file disappears, until Import rewrites it.
+# Shared with Export: internal HA config state, never a frontend /local asset.
+SHARED_STATE_PATH = Path("/homeassistant/.config-sync/live-dashboards.json")
+SHARED_GUARD_MARKER_NAME = "guard-initialized.json"
+SHARED_GUARD_MARKER_PATH = Path("/homeassistant/.config-sync/guard-initialized.json")
+# Export caches the last valid shared snapshot plus a guard-initialized marker.
+# Cache may only restrict dashboard writes; it must never authorize them.
 EXPORT_CACHE_PATH = Path("/data/live-dashboards.json")
+EXPORT_GUARD_MARKER_NAME = "provenance-guard-initialized.json"
+EXPORT_GUARD_MARKER_PATH = Path("/data") / EXPORT_GUARD_MARKER_NAME
 
 
 class InvalidProvenance(ValueError):
@@ -87,12 +95,17 @@ class ProvenanceStore:
     dashboards: dict | None = None
     managed_files: dict | None = None
     invalid: bool = False
+    guard_initialized: bool = False
+    guard_state: str = GUARD_LEGACY
+    cache_restrictions: dict | None = None
 
     def __post_init__(self):
         if self.dashboards is None:
             object.__setattr__(self, "dashboards", {})
         if self.managed_files is None:
             object.__setattr__(self, "managed_files", {})
+        if self.cache_restrictions is None:
+            object.__setattr__(self, "cache_restrictions", {})
 
     def as_dict(self) -> dict:
         return {
@@ -100,6 +113,7 @@ class ProvenanceStore:
             "dashboards": {
                 name: entry.as_dict() for name, entry in sorted(self.dashboards.items())
             },
+            "guard_initialized": True,
             "managed_files": {
                 name: entry.as_dict() for name, entry in sorted(self.managed_files.items())
             },
@@ -135,6 +149,14 @@ def skip_reason(relative: str, entry: ArtifactProvenance) -> str:
     return (
         f"SKIP {relative}: LIVE is deployed from {entry.source_ref} "
         f"@ {entry.short_sha()}. Canonical main dashboard sync disabled."
+    )
+
+
+def unavailable_reason(relative: str, *, unreadable: bool = False) -> str:
+    detail = "unreadable" if unreadable else "unavailable"
+    return (
+        f"SKIP {relative}: LIVE provenance is {detail}. "
+        "Canonical main dashboard sync disabled."
     )
 
 
@@ -188,7 +210,7 @@ def parse_store(raw: object) -> ProvenanceStore:
     if not isinstance(raw, dict):
         raise InvalidProvenance("Provenance root must be a JSON object.")
     version = raw.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in SCHEMA_VERSIONS:
         raise InvalidProvenance("Unsupported provenance schema.")
     branch = raw.get("canonical_branch", CANONICAL_BRANCH)
     if not isinstance(branch, str) or branch != CANONICAL_BRANCH:
@@ -214,11 +236,38 @@ def parse_store(raw: object) -> ProvenanceStore:
         dashboards=dashboards,
         managed_files=managed,
         invalid=False,
+        guard_initialized=True,
+        guard_state=GUARD_READY,
     )
 
 
 def empty_store() -> ProvenanceStore:
-    return ProvenanceStore(canonical_branch=CANONICAL_BRANCH, updated_at="", invalid=False)
+    return ProvenanceStore(
+        canonical_branch=CANONICAL_BRANCH,
+        updated_at="",
+        invalid=False,
+        guard_initialized=False,
+        guard_state=GUARD_LEGACY,
+    )
+
+
+def unavailable_store(
+    *,
+    dashboards: dict | None = None,
+    unreadable: bool = False,
+    reason: str = "",
+) -> ProvenanceStore:
+    detail = reason or (
+        "LIVE provenance is unreadable." if unreadable else "LIVE provenance is unavailable."
+    )
+    return ProvenanceStore(
+        canonical_branch=CANONICAL_BRANCH,
+        updated_at=detail,
+        dashboards=dashboards or {},
+        invalid=unreadable,
+        guard_initialized=True,
+        guard_state=GUARD_UNAVAILABLE,
+    )
 
 
 def _resolved_regular_file(path: Path, required_parent: Path | None = None) -> Path:
@@ -263,35 +312,79 @@ def atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
+def shared_marker_path(shared_path: Path) -> Path:
+    return shared_path.parent / SHARED_GUARD_MARKER_NAME
+
+
+def export_marker_path(cache_path: Path) -> Path:
+    return cache_path.parent / EXPORT_GUARD_MARKER_NAME
+
+
+def marker_payload() -> dict:
+    return {
+        "guard_initialized": True,
+        "schema_version": SCHEMA_VERSION,
+        "updated_at": utc_now(),
+    }
+
+
+def write_guard_marker(path: Path) -> None:
+    atomic_write_json(path, marker_payload())
+
+
+def marker_present(path: Path) -> bool:
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return False
+
+
+def arm_fail_closed_guard(*, shared_path: Path | None = None) -> None:
+    """Mark the guard initialized even when the provenance JSON cannot be written.
+
+    Export then fail-closes dashboard desired-state sync instead of treating the
+    installation as legacy canonical-main.
+    """
+    target = shared_path if shared_path is not None else SHARED_STATE_PATH
+    write_guard_marker(shared_marker_path(target))
+
+
+def _clone_store(
+    store: ProvenanceStore,
+    *,
+    dashboards: dict | None = None,
+    managed_files: dict | None = None,
+    updated_at: str | None = None,
+) -> ProvenanceStore:
+    return ProvenanceStore(
+        canonical_branch=store.canonical_branch or CANONICAL_BRANCH,
+        updated_at=updated_at if updated_at is not None else store.updated_at,
+        dashboards=dict(store.dashboards if dashboards is None else dashboards),
+        managed_files=dict(store.managed_files if managed_files is None else managed_files),
+        invalid=False,
+        guard_initialized=True,
+        guard_state=GUARD_READY,
+    )
+
+
 def save_store(
     store: ProvenanceStore,
     *,
     local_path: Path | None = None,
     shared_path: Path | None = None,
 ) -> ProvenanceStore:
-    stamped = ProvenanceStore(
-        canonical_branch=store.canonical_branch or CANONICAL_BRANCH,
-        updated_at=utc_now(),
-        dashboards=dict(store.dashboards),
-        managed_files=dict(store.managed_files),
-        invalid=False,
-    )
+    stamped = _clone_store(store, updated_at=utc_now())
     payload = stamped.as_dict()
-    wrote_any = False
-    errors: list[str] = []
-    for target in (local_path, shared_path):
-        if target is None:
-            continue
-        try:
-            atomic_write_json(target, payload)
-            wrote_any = True
-        except OSError as error:
-            errors.append(f"{target}: {error}")
-    if not wrote_any:
-        raise OSError(
-            "Could not persist dashboard provenance: "
-            + ("; ".join(errors) or "no path configured")
-        )
+    if shared_path is not None:
+        atomic_write_json(shared_path, payload)
+        write_guard_marker(shared_marker_path(shared_path))
+        verified = load_json_store(shared_path, required_parent=shared_path.parent)
+        if not verified.guard_initialized or verified.guard_state != GUARD_READY:
+            raise OSError("Shared provenance read-back did not initialize the export guard.")
+    if local_path is not None:
+        atomic_write_json(local_path, payload)
+    if local_path is None and shared_path is None:
+        raise OSError("Could not persist dashboard provenance: no path configured")
     return stamped
 
 
@@ -323,6 +416,47 @@ def load_import_store(
     return store
 
 
+def _try_load_export_file(
+    path: Path, *, required_parent: Path | None = None
+) -> tuple[str, ProvenanceStore | None]:
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        return "invalid", unavailable_store(unreadable=True)
+    if not path.exists():
+        return "missing", None
+    try:
+        return "ok", load_json_store(path, required_parent=required_parent)
+    except FileNotFoundError:
+        return "missing", None
+    except InvalidProvenance as error:
+        return "invalid", unavailable_store(unreadable=True, reason=str(error))
+
+
+def _cache_restrictions(cache: ProvenanceStore | None) -> dict:
+    if cache is None:
+        return {}
+    return {
+        name: entry
+        for name, entry in cache.dashboards.items()
+        if not is_canonical_live(entry, cache.canonical_branch)
+    }
+
+
+def _with_cache_restrictions(store: ProvenanceStore, cache: ProvenanceStore | None) -> ProvenanceStore:
+    restrictions = _cache_restrictions(cache)
+    if not restrictions:
+        return store
+    return ProvenanceStore(
+        canonical_branch=store.canonical_branch,
+        updated_at=store.updated_at,
+        dashboards=dict(store.dashboards),
+        managed_files=dict(store.managed_files),
+        invalid=store.invalid,
+        guard_initialized=store.guard_initialized,
+        guard_state=store.guard_state,
+        cache_restrictions=restrictions,
+    )
+
+
 def load_export_store(
     *,
     shared_path: Path | None = None,
@@ -330,24 +464,32 @@ def load_export_store(
 ) -> ProvenanceStore:
     shared = shared_path if shared_path is not None else SHARED_STATE_PATH
     cache = cache_path if cache_path is not None else EXPORT_CACHE_PATH
-    if shared.exists():
+    shared_status, shared_store = _try_load_export_file(
+        shared, required_parent=shared.parent
+    )
+    cache_status, cache_store = _try_load_export_file(cache)
+    initialized = (
+        marker_present(shared_marker_path(shared))
+        or marker_present(export_marker_path(cache))
+        or shared_status in {"ok", "invalid"}
+        or cache_status in {"ok", "invalid"}
+    )
+
+    if shared_status == "ok" and shared_store is not None:
         try:
-            store = load_json_store(shared, required_parent=shared.parent)
-        except InvalidProvenance as error:
-            return ProvenanceStore(invalid=True, updated_at=str(error))
-        except FileNotFoundError:
-            store = None
-        else:
-            try:
-                save_store(store, local_path=cache, shared_path=None)
-            except OSError:
-                pass
-            return store
-    if cache.exists():
-        try:
-            return load_json_store(cache)
-        except (FileNotFoundError, InvalidProvenance) as error:
-            return ProvenanceStore(invalid=True, updated_at=str(error))
+            atomic_write_json(cache, shared_store.as_dict())
+            write_guard_marker(export_marker_path(cache))
+        except OSError:
+            pass
+        return _with_cache_restrictions(shared_store, cache_store if cache_status == "ok" else None)
+
+    if shared_status == "invalid" or initialized:
+        cached_dashboards = dict(cache_store.dashboards) if cache_store is not None else {}
+        return unavailable_store(
+            dashboards=cached_dashboards,
+            unreadable=shared_status == "invalid",
+        )
+
     return empty_store()
 
 
@@ -393,11 +535,11 @@ def record_artifacts(
             canonical=canonical,
             applied_at=applied_at,
         )
-    return ProvenanceStore(
-        canonical_branch=store.canonical_branch,
-        updated_at=applied_at,
+    return _clone_store(
+        store,
         dashboards=dashboards_out,
         managed_files=managed_out,
+        updated_at=applied_at,
     )
 
 
@@ -427,21 +569,33 @@ def adopt_canonical(
     else:
         _validate_key(relative, dashboard=False)
         managed[relative] = entry
-    return ProvenanceStore(
-        canonical_branch=store.canonical_branch,
-        updated_at=entry.applied_at,
+    return _clone_store(
+        store,
         dashboards=dashboards,
         managed_files=managed,
+        updated_at=entry.applied_at,
     )
 
 
 def dashboard_sync_decision(relative: str, store: ProvenanceStore) -> tuple[bool, str | None]:
-    """Return (allowed, skip_log). Invalid stores refuse every dashboard write."""
-    if store.invalid:
-        return False, (
-            f"SKIP {relative}: LIVE provenance is unreadable. "
-            "Canonical main dashboard sync disabled."
-        )
+    """Return (allowed, skip_log).
+
+    Cache/non-canonical records may only restrict writes. A stale cached
+    CANONICAL MAIN record never authorizes a write to main. After the guard
+    has been initialized, missing or corrupt shared provenance fail-closes.
+    True legacy (guard never initialized) keeps the previous canonical-main
+    Export behaviour.
+    """
+    if store.guard_state == GUARD_UNAVAILABLE or store.invalid:
+        entry = store.dashboards.get(relative)
+        if entry is not None and not is_canonical_live(entry, store.canonical_branch):
+            return False, skip_reason(relative, entry)
+        return False, unavailable_reason(relative, unreadable=store.invalid)
+
+    restricted = store.cache_restrictions.get(relative)
+    if restricted is not None and not is_canonical_live(restricted, store.canonical_branch):
+        return False, skip_reason(relative, restricted)
+
     entry = store.dashboards.get(relative)
     if is_canonical_live(entry, store.canonical_branch):
         return True, None

@@ -142,3 +142,42 @@ class SyncGuardTests(unittest.TestCase):
         outcomes = sync(self.repo, self.current, provenance=empty_store())
         self.assertEqual(outcomes[DASH_1]["action"], "HA_CHANGE")
         self.assertEqual(load_json(self.repo / "dashboards" / DASH_1), self.live_b)
+
+    def test_stale_canonical_cache_skips_when_shared_unavailable(self):
+        from deployment_provenance import load_export_store, save_store
+
+        self.write_live(DASH_1, self.live_b)
+        shared = self.root / ".config-sync/live-dashboards.json"
+        cache = self.root / "export-cache.json"
+        save_store(
+            record_artifacts(
+                empty_store(),
+                source_ref="main",
+                source_kind="branch",
+                commit_sha=MAIN_SHA,
+                dashboards={DASH_1: digest(self.main_a)},
+            ),
+            shared_path=shared,
+        )
+        load_export_store(shared_path=shared, cache_path=cache)
+        shared.unlink()
+        (shared.parent / "guard-initialized.json").unlink()
+        store = load_export_store(shared_path=shared, cache_path=cache)
+        outcomes = sync(self.repo, self.current, provenance=store)
+        self.assertEqual(outcomes[DASH_1]["action"], "SKIPPED")
+        self.assertIn("unavailable", outcomes[DASH_1]["reason"])
+        self.assertEqual(load_json(self.repo / "dashboards" / DASH_1), self.main_a)
+
+    def test_unavailable_guard_skips_all_dashboards(self):
+        from deployment_provenance import unavailable_store
+
+        write_json(self.repo / "dashboards" / DASH_2, self.main_a)
+        self.write_live(DASH_1, self.live_b)
+        self.write_live(DASH_2, self.live_b)
+        outcomes = sync(
+            self.repo, self.current, provenance=unavailable_store(unreadable=True)
+        )
+        self.assertEqual(outcomes[DASH_1]["action"], "SKIPPED")
+        self.assertEqual(outcomes[DASH_2]["action"], "SKIPPED")
+        self.assertEqual(load_json(self.repo / "dashboards" / DASH_1), self.main_a)
+        self.assertEqual(load_json(self.repo / "dashboards" / DASH_2), self.main_a)

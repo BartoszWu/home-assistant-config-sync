@@ -23,7 +23,7 @@ timestamps describe one point-in-time export rather than history.
 
 | App | Runtime | GitHub access | Home Assistant access |
 | --- | --- | --- | --- |
-| **HA Config Sync — Export** | One-shot, no Web UI | Write deploy key for `home-assistant-config` | Reads selected data through the Supervisor-backed HA API, reads LIVE dashboard provenance from `/homeassistant/www/.config-sync/live-dashboards.json`, and writes sanitized output to its own app data directory |
+| **HA Config Sync — Export** | One-shot, no Web UI | Write deploy key for `home-assistant-config` | Reads selected data through the Supervisor-backed HA API, reads LIVE dashboard provenance from `/homeassistant/.config-sync/live-dashboards.json`, and writes sanitized output to its own app data directory |
 | **HA Config Sync — Import** | Long-running Ingress Web UI | Separate read-only deploy key for `home-assistant-config` | Reads dashboards through the HA API and allowlisted managed files from `/homeassistant`; writes only after explicit UI approval, conflict checking and read-back verification |
 
 The split keeps the GitHub write credential out of the web-facing Import App. Neither App receives Docker access, host networking, or full access. Import 0.5+ mounts writable `homeassistant_config` at `/homeassistant` for Managed Files only, constrained by `import/managed_files.yaml`, path guards, and `import/apparmor.txt`.
@@ -52,7 +52,11 @@ Feature-branch Apply is a temporary LIVE test. Import records per-dashboard prov
 - Apply from `main` → `CANONICAL MAIN`
 - Apply from a feature branch or explicit SHA → `NON-CANONICAL`
 
-Export reads `/homeassistant/www/.config-sync/live-dashboards.json` (Import also keeps `/data/dashboard-provenance.json` and Export caches a copy in `/data`). Git cannot mark a feature branch canonical. While a dashboard is non-canonical, Export skips that dashboard's `main` sync and does not move `state/dashboard-bases.json` for it. Other canonical dashboards still sync.
+Shared provenance lives at `/homeassistant/.config-sync/live-dashboards.json` (not under `www` / `/local`). Import also keeps `/data/dashboard-provenance.json`. Export may cache a copy in `/data`, but that cache can only restrict dashboard writes — a stale cached `CANONICAL MAIN` record never authorizes a write to `main`.
+
+Git cannot mark a feature branch canonical. While a dashboard is non-canonical, Export skips that dashboard's `main` sync and does not move `state/dashboard-bases.json` for it. Other canonical dashboards still sync. After the guard has been initialized, missing or corrupt shared provenance fail-closes all dashboard desired-state sync. Installations that have never written provenance remain legacy and keep the previous canonical-main Export behaviour.
+
+Non-canonical Apply is not SUCCESS until provenance persists and is read back. If persist fails, Import rolls LIVE back; if rollback fails, it arms the fail-closed guard.
 
 After the feature is merged to `main` outside Import, open Import on `main` and Refresh. If LIVE hash equals Git `main`, Import marks that dashboard `CANONICAL MAIN` without rewriting the identical dashboard. Manual HA edits during a feature deployment stay conflicts in Import; Export will not publish them to `main`.
 

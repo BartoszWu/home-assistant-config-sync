@@ -33,10 +33,13 @@ from git_source import (
 )
 from deployment_provenance import (
     IMPORT_STATE_PATH,
+    InvalidProvenance,
     SHARED_STATE_PATH,
     adopt_canonical,
+    arm_fail_closed_guard,
     is_canonical_source,
     load_import_store,
+    load_json_store,
     provenance_label,
     record_artifacts,
     save_store,
@@ -642,12 +645,26 @@ def valid_relative(value):
     return len(path.parts) == 1 and path.suffix == ".json" and ".." not in path.parts
 
 
-def persist_provenance(store):
-    return save_store(
+def persist_provenance(store, *, required_dashboard=None, required_hash=None):
+    saved = save_store(
         store,
         local_path=IMPORT_STATE_PATH,
         shared_path=SHARED_STATE_PATH,
     )
+    verified = load_json_store(
+        SHARED_STATE_PATH, required_parent=SHARED_STATE_PATH.parent
+    )
+    if required_dashboard:
+        entry = verified.dashboards.get(required_dashboard)
+        if entry is None:
+            raise OSError(
+                f"Shared provenance missing {required_dashboard} after persist."
+            )
+        if required_hash and entry.content_hash != required_hash:
+            raise OSError(
+                f"Shared provenance hash mismatch for {required_dashboard}."
+            )
+    return saved
 
 
 def live_provenance_store():
@@ -946,11 +963,13 @@ def apply_selected():
             allowed_managed = {entry.path for entry in entries}
             if any(value not in allowed_managed for value in managed_selected):
                 abort(400)
+            store = live_provenance_store()
             if selected:
                 fresh = {
                     change["relative"]: change
                     for change in collect_changes(revision=revision)
                 }
+                store = live_provenance_store()
                 for relative in selected:
                     change = fresh.get(relative)
                     if change and (not matches_preview(change["current"], previews[relative])
@@ -973,6 +992,7 @@ def apply_selected():
                     if not matches_preview(ha_dashboard_config(relative), previews[relative]):
                         results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
                         continue
+                    before = change["current"]
                     save_dashboard(relative, change["github"])
                     verified = ha_dashboard_config(relative)
                     if digest(verified) != digest(change["github"]):
@@ -981,6 +1001,50 @@ def apply_selected():
                             "message": f"{relative}: save returned, but read-back verification failed.",
                         })
                         continue
+                    try:
+                        next_store = record_artifacts(
+                            store,
+                            source_ref=revision.source_ref,
+                            source_kind=revision.source_kind,
+                            commit_sha=revision.commit_sha,
+                            dashboards={relative: desired_previews[relative]},
+                        )
+                        persist_provenance(
+                            next_store,
+                            required_dashboard=relative,
+                            required_hash=desired_previews[relative],
+                        )
+                    except (OSError, InvalidProvenance) as persist_error:
+                        rolled_back = False
+                        try:
+                            save_dashboard(relative, before)
+                            restored = ha_dashboard_config(relative)
+                            rolled_back = digest(restored) == digest(before)
+                        except Exception:
+                            rolled_back = False
+                        if not rolled_back:
+                            try:
+                                arm_fail_closed_guard(shared_path=SHARED_STATE_PATH)
+                            except OSError:
+                                pass
+                            results.append({
+                                "ok": False,
+                                "message": (
+                                    f"{relative}: LIVE was written but provenance could not "
+                                    "be persisted and rollback failed. Dashboard export to "
+                                    "main is blocked until provenance is restored."
+                                ),
+                            })
+                        else:
+                            results.append({
+                                "ok": False,
+                                "message": (
+                                    f"{relative}: provenance persist failed; LIVE rolled back. "
+                                    f"Apply FAILED ({persist_error})."
+                                ),
+                            })
+                        continue
+                    store = next_store
                     results.append({
                         "ok": True,
                         "message": f"{relative}: Applied and verified.",
@@ -1004,22 +1068,29 @@ def apply_selected():
                     commit_sha=revision.commit_sha,
                 )
                 results.extend(managed_results)
-            if applied or managed_applied:
+            if managed_applied:
                 try:
                     store = record_artifacts(
-                        live_provenance_store(),
+                        store,
                         source_ref=revision.source_ref,
                         source_kind=revision.source_kind,
                         commit_sha=revision.commit_sha,
-                        dashboards={
-                            relative: desired_previews[relative] for relative in applied
-                        },
                         managed_files={
                             relative: managed_desired[relative]
                             for relative in managed_applied
                         },
                     )
                     persist_provenance(store)
+                except (OSError, InvalidProvenance):
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            "Managed files were applied, but provenance metadata "
+                            "could not be stored."
+                        ),
+                    })
+            if applied or managed_applied:
+                try:
                     record_last_apply(
                         source_ref=revision.source_ref,
                         commit_sha=revision.commit_sha,

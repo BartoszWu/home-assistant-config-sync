@@ -108,6 +108,7 @@ abort("Import must map writable homeassistant_config at /homeassistant for Manag
 %w[apparmor.txt managed_files.yaml managed_files.py].each do |name|
   abort("Import is missing #{name}") unless File.file?(File.join(root, "import", name))
 end
+abort("Export is missing apparmor.txt") unless File.file?(File.join(root, "export", "apparmor.txt"))
 apparmor = File.read(File.join(root, "import", "apparmor.txt"), encoding: "UTF-8")
 # Full deny mode set against broad `file,` (apparmor.d(5)): r/w/m/l/k/x plus
 # a separate append deny (`a` conflicts with `w` in one ACCESS list).
@@ -147,6 +148,33 @@ end
 end
 policy = File.read(File.join(root, "import", "managed_files.yaml"), encoding: "UTF-8")
 abort("managed_files.yaml must not be empty") if policy.strip.empty?
+%w[
+  /homeassistant/.config-sync/ rw,
+  /homeassistant/.config-sync/live-dashboards.json rw,
+  /homeassistant/.config-sync/guard-initialized.json rw,
+].each do |rule|
+  abort("import/apparmor.txt must allow #{rule}") unless apparmor.include?(rule)
+end
+if apparmor.include?("/homeassistant/www/.config-sync/live-dashboards.json")
+  abort("import/apparmor.txt must not place LIVE provenance under www")
+end
+export_apparmor = File.read(File.join(root, "export", "apparmor.txt"), encoding: "UTF-8")
+%w[
+  /homeassistant/.config-sync/ r,
+  /homeassistant/.config-sync/live-dashboards.json r,
+  /homeassistant/.config-sync/guard-initialized.json r,
+].each do |rule|
+  abort("export/apparmor.txt must allow #{rule}") unless export_apparmor.include?(rule)
+end
+unless export_apparmor.include?("deny /homeassistant/.config-sync/** w,")
+  abort("export/apparmor.txt must deny writes to shared provenance")
+end
+if export_apparmor.include?("/homeassistant/www/.config-sync/live-dashboards.json")
+  abort("export/apparmor.txt must not place LIVE provenance under www")
+end
+unless export_config["apparmor"] == true && import_config["apparmor"] == true
+  abort("Import and Export must enable custom AppArmor")
+end
 RUBY
 
 python3 - "$root" <<'PY'
@@ -161,6 +189,16 @@ if (root / "export/security.py").read_bytes() != (root / "import/security.py").r
     raise SystemExit("Security build-context mirrors differ")
 if (root / "export/deployment_provenance.py").read_bytes() != (root / "import/deployment_provenance.py").read_bytes():
     raise SystemExit("deployment_provenance.py build-context mirrors differ")
+shared_path = "/homeassistant/.config-sync/live-dashboards.json"
+forbidden_www = "/homeassistant/www/.config-sync/live-dashboards.json"
+for relative in ("import/deployment_provenance.py", "export/deployment_provenance.py"):
+    text = (root / relative).read_text(encoding="utf-8")
+    if shared_path not in text:
+        raise SystemExit(f"{relative} must use internal shared provenance path")
+    if forbidden_www in text:
+        raise SystemExit(f"{relative} must not keep provenance under www")
+if "www/.config-sync" in (root / "import/managed_files.yaml").read_text(encoding="utf-8"):
+    raise SystemExit("managed_files.yaml must not expand into provenance state")
 
 for path in root.rglob("*.json"):
     if ".git" not in path.parts:

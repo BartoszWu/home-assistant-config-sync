@@ -114,7 +114,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
                   patch.object(app, 'refresh_repo', return_value=fake_revision()),
                   patch.object(app, 'ha_dashboard_config', side_effect=lambda _: copy.deepcopy(self.live)),
                   patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
-                  patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / 'www/.config-sync/live-dashboards.json')]:
+                  patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / '.config-sync/live-dashboards.json')]:
             p.start()
             self.addCleanup(p.stop)
 
@@ -257,6 +257,119 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         self.assertEqual(entry.source_ref, 'feature/temp-redesign')
         self.assertIn('NON-CANONICAL', html)
         self.assertIn('LIVE FROM FEATURE', html)
+
+    def test_feature_apply_rolls_back_when_provenance_persist_fails(self):
+        app = self.app_module
+        original = copy.deepcopy(self.live)
+        feature_sha = 'e' * 40
+        self.form['source'] = 'feature/temp-redesign'
+        self.form['reviewed_sha'] = feature_sha
+
+        def save(_, value):
+            self.live = copy.deepcopy(value)
+
+        with patch.object(app, 'refresh_repo', return_value=fake_revision(
+                source_ref='feature/temp-redesign', commit_sha=feature_sha)), \
+             patch.object(app, 'save_dashboard', side_effect=save) as saved, \
+             patch.object(app, 'persist_provenance', side_effect=OSError('disk full')), \
+             patch.object(app, 'request_export') as export:
+            response = self.submit()
+        html = response.get_data(as_text=True)
+        self.assertIn('Apply FAILED', html)
+        self.assertIn('rolled back', html)
+        self.assertEqual(self.live, original)
+        self.assertGreaterEqual(saved.call_count, 2)
+        saved.assert_any_call('test.json', original)
+        export.assert_not_called()
+        self.assertFalse(app.SHARED_STATE_PATH.exists())
+
+    def test_feature_apply_arms_fail_closed_guard_when_rollback_fails(self):
+        app = self.app_module
+        feature_sha = 'e' * 40
+        self.form['source'] = 'feature/temp-redesign'
+        self.form['reviewed_sha'] = feature_sha
+        saves = []
+
+        def save(relative, value):
+            saves.append(copy.deepcopy(value))
+            if len(saves) == 1:
+                self.live = copy.deepcopy(value)
+            else:
+                raise RuntimeError('rollback failed')
+
+        with patch.object(app, 'refresh_repo', return_value=fake_revision(
+                source_ref='feature/temp-redesign', commit_sha=feature_sha)), \
+             patch.object(app, 'save_dashboard', side_effect=save), \
+             patch.object(app, 'persist_provenance', side_effect=OSError('disk full')), \
+             patch.object(app, 'request_export') as export:
+            response = self.submit()
+        html = response.get_data(as_text=True)
+        self.assertIn('rollback failed', html)
+        self.assertIn('Dashboard export to main is blocked', html)
+        self.assertEqual(self.live, self.desired)
+        self.assertTrue(
+            (app.SHARED_STATE_PATH.parent / 'guard-initialized.json').exists()
+        )
+        export.assert_not_called()
+
+    def test_partial_apply_keeps_only_persisted_dashboard_provenance(self):
+        app = self.app_module
+        second = self.repo / 'dashboards/other.json'
+        second.write_text(json.dumps(self.desired))
+        bases_path = self.repo / 'state/dashboard-bases.json'
+        bases = json.loads(bases_path.read_text())
+        bases['dashboards']['other.json'] = {'sha256': app.digest(self.live)}
+        bases_path.write_text(json.dumps(bases))
+        self.form = {
+            'selected': ['test.json', 'other.json'],
+            'preview_hash': [
+                'test.json:' + app.digest(self.live),
+                'other.json:' + app.digest(self.live),
+            ],
+            'desired_hash': [
+                'test.json:' + app.digest(self.desired),
+                'other.json:' + app.digest(self.desired),
+            ],
+            'source': 'feature/temp-redesign',
+            'reviewed_sha': 'e' * 40,
+        }
+        persists = {'n': 0}
+        lives = {
+            'test.json': copy.deepcopy(self.live),
+            'other.json': copy.deepcopy(self.live),
+        }
+
+        def persist(store, **kwargs):
+            persists['n'] += 1
+            if persists['n'] >= 2:
+                raise OSError('second persist failed')
+            return app.save_store(
+                store,
+                local_path=app.IMPORT_STATE_PATH,
+                shared_path=app.SHARED_STATE_PATH,
+            )
+
+        def ha_cfg(relative):
+            return copy.deepcopy(lives[relative])
+
+        def save(relative, value):
+            lives[relative] = copy.deepcopy(value)
+
+        with patch.object(app, 'refresh_repo', return_value=fake_revision(
+                source_ref='feature/temp-redesign', commit_sha='e' * 40)), \
+             patch.object(app, 'ha_dashboard_config', side_effect=ha_cfg), \
+             patch.object(app, 'save_dashboard', side_effect=save), \
+             patch.object(app, 'persist_provenance', side_effect=persist), \
+             patch.object(app, 'request_export') as export:
+            response = self.submit()
+        from deployment_provenance import load_json_store
+        html = response.get_data(as_text=True)
+        self.assertIn('test.json: Applied and verified', html)
+        self.assertIn('other.json: provenance persist failed', html)
+        store = load_json_store(app.IMPORT_STATE_PATH)
+        self.assertIn('test.json', store.dashboards)
+        self.assertNotIn('other.json', store.dashboards)
+        export.assert_called_once_with(['test.json'])
 
 class ResourcePolicyTests(unittest.TestCase):
     def test_hacs_resource_drops_version_without_false_mac_exclusion(self):

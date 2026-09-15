@@ -76,6 +76,11 @@ profile ha_config_sync_import flags=(attach_disconnected,mediate_deleted) {
   /homeassistant/custom_templates/ rw,
   /homeassistant/custom_templates/** rw,
 
+  # Internal LIVE provenance — not a frontend /local asset.
+  /homeassistant/.config-sync/ rw,
+  /homeassistant/.config-sync/live-dashboards.json rw,
+  /homeassistant/.config-sync/guard-initialized.json rw,
+
   # Hard denies inside the HA config mount (even if a future bug expands paths).
   # Directory path (`…/`) and descendants (`…/**`) are separate AppArmor globs.
   deny /homeassistant/.storage/ rwmlkx,

@@ -98,8 +98,12 @@ def publish(repo, source=Path('/export'), dashboards=Path('/tmp/ha-current/dashb
             filename = record.get('file')
             outcome = outcomes.get(filename) if filename else None
             if outcome and outcome.get('action') == 'SKIPPED':
-                record['git_ha_status'] = 'SKIPPED_NON_CANONICAL'
-                record['canonical_sync'] = outcome.get('reason') or 'SKIPPED'
+                reason = outcome.get('reason') or 'SKIPPED'
+                if 'unreadable' in reason or 'unavailable' in reason:
+                    record['git_ha_status'] = 'SKIPPED_PROVENANCE_UNAVAILABLE'
+                else:
+                    record['git_ha_status'] = 'SKIPPED_NON_CANONICAL'
+                record['canonical_sync'] = reason
             elif filename:
                 desired = repo / 'dashboards' / filename
                 record['git_ha_status'] = 'SAME' if desired.exists() and digest(load_json(desired)) == digest(load_json(dashboards / filename)) else 'DIFFERENT'
