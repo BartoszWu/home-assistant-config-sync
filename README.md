@@ -54,9 +54,11 @@ while the base is still absent. Import reports
 ## Visual dashboard preview (Import)
 
 The existing side-by-side JSON diff is preserved under the **YAML diff** tab
-(the label does not convert the exported JSON into YAML). **Visual** is the
-preferred dashboard tab when JavaScript is available. Click **Generate visual
-preview** to load desktop (1440×900) and mobile (390×844), Before/After.
+(the label does not convert the exported JSON into YAML). It now follows a
+GitHub-style files-changed view: a jump list of changed files, then hunks with
+three lines of context instead of the whole document. Unchanged files are
+collapsed. **Visual** is the preferred dashboard tab when JavaScript is available.
+Click **Generate visual preview** to load desktop (1440×900) and mobile (390×844), Before/After.
 Apply and its fresh conflict check/read-back verification are unchanged.
 Cancel clears the selection and disposes previews; nothing needs rolling back.
 

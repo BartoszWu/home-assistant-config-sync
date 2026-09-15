@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
 
 from visual_preview import UNAVAILABLE, prepare_preview
+from diff_view import compare_json, file_anchor, hunk_rows
 
 
 BEFORE = {"views": [{"title": "Before", "cards": []}]}
@@ -146,11 +147,15 @@ class PreviewHttpTests(unittest.TestCase):
             "github": AFTER, "current": BEFORE, "base": digest(BEFORE),
             "preview_desired_hash": digest(AFTER), "preview_ha_hash": digest(BEFORE), "status": "READY TO APPLY",
             "css": "ready", "selectable": True, "reason": "",
-            "rows": app.side_by_side(BEFORE, AFTER)[0], "added": 1, "removed": 1,
+            "kind": "dashboard",
+            "anchor": file_anchor("dashboard", "test-dashboard.json"),
+            "diff": compare_json(BEFORE, AFTER),
+            "rows": hunk_rows(compare_json(BEFORE, AFTER)), "added": 1, "removed": 1,
             "visual": prepare_preview("test-dashboard.json", BEFORE, AFTER, lambda _: None),
         }
         self.patches = [patch.object(app, "refresh_repo", return_value="test-commit"),
-                        patch.object(app, "collect_changes", return_value=[self.change])]
+                        patch.object(app, "collect_changes", return_value=[self.change]),
+                        patch.object(app, "collect_managed_changes", return_value=([], {}))]
         for mock in self.patches:
             mock.start()
             self.addCleanup(mock.stop)
@@ -168,6 +173,27 @@ class PreviewHttpTests(unittest.TestCase):
         self.assertIn('GitHub HEAD', html)
         # Progressive enhancement: diff is usable if JavaScript fails to load.
         self.assertIn('<div class="yaml-panel">', html)
+        self.assertIn("Changed files", html)
+        self.assertIn("dashboards/test-dashboard.json", html)
+        self.assertIn("@@", html)
+
+    def test_hunk_diff_omits_distant_unchanged_lines(self):
+        before = {"views": [{"title": f"keep-{index}"} for index in range(40)]}
+        after = {"views": list(before["views"])}
+        after["views"] = list(after["views"])
+        after["views"][20] = {"title": "changed-title"}
+        self.change["visual"] = None
+        self.change["current"] = before
+        self.change["github"] = after
+        self.change["diff"] = compare_json(before, after)
+        self.change["rows"] = hunk_rows(self.change["diff"])
+        self.change["added"] = self.change["diff"]["added"]
+        self.change["removed"] = self.change["diff"]["removed"]
+        html = self.request().get_data(as_text=True)
+        self.assertIn("unchanged line", html)
+        self.assertIn("changed-title", html)
+        self.assertNotIn("keep-0", html)
+        self.assertNotIn("keep-39", html)
 
     def test_resource_without_visual_retains_diff(self):
         self.change["visual"] = None
@@ -193,7 +219,10 @@ class PreviewHttpTests(unittest.TestCase):
         desired = {"views": [{"cards": [{"type": "custom:apexcharts-card", "series": []}]}]}
         self.change["github"] = desired
         self.change["preview_desired_hash"] = self.module.digest(desired)
-        self.change["rows"] = self.module.side_by_side(BEFORE, desired)[0]
+        self.change["diff"] = compare_json(BEFORE, desired)
+        self.change["rows"] = hunk_rows(self.change["diff"])
+        self.change["added"] = self.change["diff"]["added"]
+        self.change["removed"] = self.change["diff"]["removed"]
         self.change["visual"] = prepare_preview("test-dashboard.json", BEFORE, desired, lambda _: None)
         self.assertNotIn("error", self.change["visual"])
         html = self.request().get_data(as_text=True)

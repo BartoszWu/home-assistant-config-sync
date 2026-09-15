@@ -1,8 +1,6 @@
-import difflib
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -18,6 +16,14 @@ from dashboard_logic import (
     digest,
     matches_preview,
     parse_preview_hashes,
+)
+from diff_view import (
+    compare_json,
+    file_anchor,
+    hunk_rows,
+    is_changed_review,
+    json_lines,
+    summarize_changed_files,
 )
 from managed_files import (
     apply_managed_files,
@@ -103,7 +109,18 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 .left-del,.right-add { background:#ffe5e5; }
 .right-add { background:#dcf8e3; }
 .blank { background:#f6f7f8; }
+.card[id] { scroll-margin-top: 16px; }
 .counts { margin-left:auto; font-size:13px; color:var(--muted-color); }
+.counts .add { color:#1a7f37; font-weight:650; }
+.counts .del { color:#d1242f; font-weight:650; }
+.files-changed h2 { margin:0 0 6px; }
+.file-list { list-style:none; margin:12px 0 0; padding:0; border-top:1px solid #d9dde1; }
+.file-list a { display:flex; gap:12px; align-items:center; flex-wrap:nowrap; padding:10px 0; text-decoration:none; color:inherit; border-bottom:1px solid #eceff1; }
+.file-list a:hover { background:#eef3f7; }
+.file-list .path { font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.diff-gap td { text-align:center; background:#f0f4f8; color:#57606a; font-size:12px; padding:6px 8px; }
+.diff-hunk td { background:#ddf4ff; color:#0550ae; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; padding:4px 8px; text-align:left; }
+.unchanged-files { margin-top:20px; }
 .actions { position:sticky; bottom:0; display:flex; gap:8px; justify-content:flex-end; padding-top:12px; }
 .preview-tabs { display:flex; gap:8px; margin:12px 0; }
 .preview-tabs button[aria-selected="false"] { background:#687078; }
@@ -131,6 +148,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   .diff th,.ln { background:#252a2f; }
   .diff td { border-color:#30353a; }
   .left-del { background:#57272a; } .right-add { background:#1f5130; } .blank { background:#202428; }
+  .file-list { border-color:#30353a; }
+  .file-list a { border-color:#30353a; }
+  .file-list a:hover { background:#252a2f; }
+  .counts .add { color:#3fb950; }
+  .counts .del { color:#f85149; }
+  .diff-gap td { background:#252a2f; color:#aab0b6; }
+  .diff-hunk td { background:#1c3d5a; color:#79c0ff; }
   .preview-viewport { background:#1a1e22; }
 }
 </style>
@@ -171,11 +195,41 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </section>
 {% endif %}
 
-<form id="apply-form" method="post" action="apply">
-{% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
-{% if changes %}<h2>Dashboards</h2>{% endif %}
-{% for change in changes %}
-<section class="card">
+{% macro render_diff(change) -%}
+<div class="diff-wrap">
+  {% if not change.diff or not change.diff.blocks %}
+    <p class="small" style="margin:12px">No line changes.</p>
+  {% else %}
+  <table class="diff">
+    <colgroup>
+      <col class="ln">
+      <col>
+      <col class="ln">
+      <col>
+    </colgroup>
+    <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
+    <tbody>
+    {% for block in change.diff.blocks %}
+      {% if block.type == "gap" %}
+        <tr class="diff-gap"><td colspan="2">{{ block.count }} unchanged line{% if block.count != 1 %}s{% endif %}</td><td colspan="2">{{ block.count }} unchanged line{% if block.count != 1 %}s{% endif %}</td></tr>
+      {% else %}
+        <tr class="diff-hunk"><td colspan="2">{{ block.header }}</td><td colspan="2">{{ block.header }}</td></tr>
+        {% for row in block.rows %}
+        <tr>
+          <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
+          <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
+        </tr>
+        {% endfor %}
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro dashboard_card(change) -%}
+<section class="card" id="{{ change.anchor }}">
   <div class="change-head">
     {% if change.selectable %}
     <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}">
@@ -183,7 +237,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
       <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
-    <span class="counts">{{ change.added }} added · {{ change.removed }} removed</span>
+    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
   <div class="small">Dashboard · dashboards/{{ change.relative }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
@@ -210,23 +264,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
       </div>
     </div>
     {% endif %}
-    <div class="yaml-panel">
-    <div class="diff-wrap"><table class="diff">
-      <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
-      <tbody>{% for row in change.rows %}<tr>
-        <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
-        <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
-      </tr>{% endfor %}</tbody>
-    </table></div></div>
+    <div class="yaml-panel">{{ render_diff(change)|safe }}</div>
   </details>
 </section>
-{% endfor %}
+{%- endmacro %}
 
-{% if managed_changes %}
-<h2>Managed files</h2>
-<p class="small">Desired state is Git → HA only. Bases live in Import <code>/data</code>. No automatic Export of these files.</p>
-{% for change in managed_changes %}
-<section class="card">
+{% macro managed_card(change) -%}
+<section class="card" id="{{ change.anchor }}">
   <div class="change-head">
     {% if change.selectable %}
     <input type="checkbox" name="managed_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
@@ -234,7 +278,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <input type="hidden" name="managed_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
     <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
-    <span class="counts">{{ change.added }} added · {{ change.removed }} removed</span>
+    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
   <div class="small">Profile · {{ change.profile }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
@@ -246,16 +290,51 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   {% endif %}
   <details {% if change.status != 'SAME' %}open{% endif %}>
     <summary>Review changes</summary>
-    <div class="diff-wrap"><table class="diff">
-      <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
-      <tbody>{% for row in change.rows %}<tr>
-        <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
-        <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
-      </tr>{% endfor %}</tbody>
-    </table></div>
+    {{ render_diff(change)|safe }}
   </details>
 </section>
-{% endfor %}
+{%- endmacro %}
+
+<form id="apply-form" method="post" action="apply">
+{% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
+{% if file_summary.count %}
+<nav class="card files-changed" aria-label="Changed files">
+  <h2>Changed files</h2>
+  <p class="small">{{ file_summary.count }} file{% if file_summary.count != 1 %}s{% endif %}
+    · <span class="counts"><span class="add">+{{ file_summary.added }}</span> · <span class="del">−{{ file_summary.removed }}</span></span>
+    · hunks with 3 lines of context, like GitHub</p>
+  <ul class="file-list">
+    {% for item in file_summary.files %}
+    <li>
+      <a href="#{{ item.anchor }}">
+        <span class="path">{{ item.path }}</span>
+        <span class="counts"><span class="add">+{{ item.added }}</span> <span class="del">−{{ item.removed }}</span></span>
+        <span class="status {{ item.css }}">{{ item.status }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+</nav>
+{% endif %}
+{% if changed_dashboards %}<h2>Dashboards</h2>{% endif %}
+{% for change in changed_dashboards %}{{ dashboard_card(change)|safe }}{% endfor %}
+
+{% if changed_managed %}
+<h2>Managed files</h2>
+<p class="small">Desired state is Git → HA only. Bases live in Import <code>/data</code>. No automatic Export of these files.</p>
+{% for change in changed_managed %}{{ managed_card(change)|safe }}{% endfor %}
+{% endif %}
+
+{% if unchanged_dashboards or unchanged_managed %}
+<details class="unchanged-files">
+  <summary>Unchanged files ({{ unchanged_count }})</summary>
+  {% if unchanged_dashboards %}<h2>Dashboards</h2>{% endif %}
+  {% for change in unchanged_dashboards %}{{ dashboard_card(change)|safe }}{% endfor %}
+  {% if unchanged_managed %}
+  <h2>Managed files</h2>
+  {% for change in unchanged_managed %}{{ managed_card(change)|safe }}{% endfor %}
+  {% endif %}
+</details>
 {% endif %}
 <div class="actions">
   <button id="cancel-button" type="reset">Cancel</button>
@@ -420,37 +499,24 @@ def request_export(applied):
 
 
 def pretty_lines(value):
-    return json.dumps(
-        value, ensure_ascii=False, indent=2, sort_keys=True
-    ).splitlines()
+    return json_lines(value)
 
 
 def side_by_side(current, github):
-    left = pretty_lines(current)
-    right = pretty_lines(github)
-    matcher = difflib.SequenceMatcher(a=left, b=right)
-    rows = []
-    added = removed = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        left_part = left[i1:i2]
-        right_part = right[j1:j2]
-        width = max(len(left_part), len(right_part))
-        if tag in {"replace", "delete"}:
-            removed += len(left_part)
-        if tag in {"replace", "insert"}:
-            added += len(right_part)
-        for offset in range(width):
-            has_left = offset < len(left_part)
-            has_right = offset < len(right_part)
-            rows.append({
-                "left_no": i1 + offset + 1 if has_left else None,
-                "left": left_part[offset] if has_left else "",
-                "left_css": "left-del" if has_left and tag != "equal" else ("blank" if not has_left else ""),
-                "right_no": j1 + offset + 1 if has_right else None,
-                "right": right_part[offset] if has_right else "",
-                "right_css": "right-add" if has_right and tag != "equal" else ("blank" if not has_right else ""),
-            })
-    return rows, added, removed
+    diff = compare_json(current, github)
+    return hunk_rows(diff), diff["added"], diff["removed"]
+
+
+def dashboard_review_fields(relative, current, github):
+    diff = compare_json(current, github)
+    return {
+        "kind": "dashboard",
+        "anchor": file_anchor("dashboard", relative),
+        "diff": diff,
+        "rows": hunk_rows(diff),
+        "added": diff["added"],
+        "removed": diff["removed"],
+    }
 
 
 def valid_relative(value):
@@ -477,7 +543,6 @@ def collect_changes():
             base,
             unsafe=unsafe_reason(github),
         )
-        rows, added, removed = side_by_side(current, github)
         changes.append({
             "visual": prepare_preview(relative, current, github, unsafe_reason),
             "name": github_path.stem,
@@ -491,9 +556,7 @@ def collect_changes():
             "css": css,
             "selectable": selectable,
             "reason": reason,
-            "rows": rows,
-            "added": added,
-            "removed": removed,
+            **dashboard_review_fields(relative, current, github),
         })
     return changes
 
@@ -533,6 +596,14 @@ def render_review(results=None):
         TEMPLATE,
         changes=changes,
         managed_changes=managed_changes,
+        changed_dashboards=[item for item in changes if is_changed_review(item)],
+        unchanged_dashboards=[item for item in changes if not is_changed_review(item)],
+        changed_managed=[item for item in managed_changes if is_changed_review(item)],
+        unchanged_managed=[item for item in managed_changes if not is_changed_review(item)],
+        unchanged_count=sum(
+            1 for item in (*changes, *managed_changes) if not is_changed_review(item)
+        ),
+        file_summary=summarize_changed_files(changes, managed_changes),
         managed_policy_error=MANAGED_POLICY_ERROR,
         error=error,
         commit=commit,
