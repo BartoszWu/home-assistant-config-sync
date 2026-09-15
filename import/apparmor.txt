@@ -1,0 +1,84 @@
+#include <tunables/global>
+
+# Custom AppArmor profile for HA Config Sync — Import.
+# Mount: homeassistant_config → /homeassistant (RW). Application allowlist is
+# still authoritative; this profile is defense-in-depth on the filesystem.
+#
+# Profile name must match config.yaml slug. Supervisor loads import/apparmor.txt.
+profile ha_config_sync_import flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+
+  signal,
+  network,
+  file,
+
+  # S6 / Bashio / runtime
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/local/bin/** ix,
+  /sbin/** ix,
+  /usr/sbin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /dev/tty rw,
+  /usr/lib/bashio/** ix,
+  /tmp/** rwk,
+  /data/** rwk,
+
+  # App code and Python deps
+  /app.py r,
+  /dashboard_logic.py r,
+  /visual_preview.py r,
+  /managed_files.py r,
+  /managed_files.yaml r,
+  /security.py r,
+  /run.sh rix,
+  /static/** r,
+  /usr/lib/python*/** mr,
+  /usr/local/lib/python*/** mr,
+  /usr/lib/libpython* mr,
+
+  # Read-only GitHub deploy key material (addon_config → /review)
+  /review/** r,
+  /review/ssh/** r,
+
+  # Git / SSH clone into /tmp
+  /usr/bin/git ix,
+  /usr/bin/ssh ix,
+  /usr/bin/ssh-keyscan ix,
+  /etc/ssl/certs/** r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/nsswitch.conf r,
+  /etc/resolv.conf r,
+  /etc/hosts r,
+
+  # HA config mount: allow only managed trees (+ preview staging under www).
+  /homeassistant/ r,
+  /homeassistant/packages/ rw,
+  /homeassistant/packages/** rw,
+  /homeassistant/www/ rw,
+  /homeassistant/www/** rw,
+  /homeassistant/custom_templates/ rw,
+  /homeassistant/custom_templates/** rw,
+
+  # Hard denies inside the HA config mount (even if a future bug expands paths).
+  deny /homeassistant/.storage/** rwx,
+  deny /homeassistant/secrets.yaml rwx,
+  deny /homeassistant/configuration.yaml rwx,
+  deny /homeassistant/custom_components/** rwx,
+  deny /homeassistant/.cloud/** rwx,
+  deny /homeassistant/backups/** rwx,
+  deny /homeassistant/**/*.db rwx,
+  deny /homeassistant/**/*.db-shm rwx,
+  deny /homeassistant/**/*.db-wal rwx,
+  deny /homeassistant/**/*.sqlite rwx,
+  deny /homeassistant/**/*.sqlite3 rwx,
+}

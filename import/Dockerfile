@@ -16,14 +16,18 @@ RUN apk add --no-cache \
         --break-system-packages \
         "Flask==3.1.1" \
         "gunicorn==23.0.0" \
-        "websocket-client==1.8.0"
+        "websocket-client==1.8.0" \
+        "PyYAML==6.0.2"
 
 COPY app.py /app.py
 COPY dashboard_logic.py /dashboard_logic.py
 COPY visual_preview.py /visual_preview.py
+COPY managed_files.py /managed_files.py
+COPY managed_files.yaml /managed_files.yaml
 COPY static /static
 COPY security.py /security.py
 COPY run.sh /run.sh
+COPY apparmor.txt /apparmor.txt
 
 RUN chmod 0755 /run.sh
 

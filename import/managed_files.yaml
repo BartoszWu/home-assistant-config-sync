@@ -1,0 +1,15 @@
+# Declarative Managed Files policy for HA Config Sync — Import.
+# Lives in the App code repository only. The data repository cannot expand this list.
+#
+# Adding a file later: append an entry with an existing profile. Do not change the engine.
+schema_version: 1
+
+# Container mount of Supervisor type homeassistant_config (see import/config.yaml).
+ha_config_root: /homeassistant
+
+managed_files:
+  - path: packages/temperatura.yaml
+    profile: package
+
+  - path: www/temperature-card.mjs
+    profile: frontend_module

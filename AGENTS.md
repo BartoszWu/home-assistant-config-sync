@@ -40,6 +40,11 @@ engineering and security invariants.
 ├── repository.yaml
 ├── export/
 ├── import/
+│   ├── app.py
+│   ├── managed_files.py
+│   ├── managed_files.yaml
+│   ├── apparmor.txt
+│   └── ...
 └── scripts/
 ```
 
@@ -50,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `config.yaml` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `config.yaml` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.5.0` (Managed Files V1) |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -60,7 +65,10 @@ The two-App split is a deliberate security boundary:
 
 - Export has the GitHub **write** deploy key and no Web UI.
 - Import has a separate GitHub **read-only** deploy key and an Ingress Web UI.
-- Import may write to Home Assistant only through the HA API, only after explicit UI approval, a fresh conflict check, and read-back verification.
+- Import may write to Home Assistant through the HA API for dashboards, and
+  through the allowlisted Managed Files engine for declared paths under
+  `/homeassistant`, only after explicit UI approval, a fresh conflict check, and
+  read-back verification.
 - Never put the GitHub write credential in Import.
 - Never reuse the same deploy key for Export and Import.
 
@@ -69,14 +77,33 @@ Do not add any of the following unless the user explicitly approves a reviewed a
 - `full_access`
 - `docker_api`
 - `host_network`
-- access to `/config/.storage`
-- broad Home Assistant config mappings
-- host filesystem access
+- access to `/config/.storage` (application and AppArmor must keep denying `.storage`)
+- `all_addon_configs`
+- host filesystem access outside the reviewed `homeassistant_config` mount
+
+**Managed Files (Import 0.5+)** is an approved exception to the previous
+“API-only writes” rule:
+
+- Import may map writable `homeassistant_config` at `/homeassistant` solely to
+  apply the declarative allowlist in `import/managed_files.yaml`.
+- The allowlist lives in the App code repository only. The data repository cannot
+  expand Import permissions.
+- Application path guards reject traversal, symlinks, `.storage`, `secrets.yaml`,
+  databases, `configuration.yaml`, and `custom_components`.
+- Custom `import/apparmor.txt` adds filesystem deny rules for those sensitive
+  paths. AppArmor is defense-in-depth; the application allowlist remains primary.
+- Desired state for managed files is **Git → HA only**. Bases are stored in
+  Import `/data/managed-file-bases.json`. Do not add Export round-trip for these
+  files without a new reviewed decision.
+- Frontend modules may be staged under `www/.config-sync-preview/` for preview;
+  Apply alone may update the canonical `www/` path.
+- Never auto-restart Core; invalid config must roll back; packages use
+  `POST /api/config/core/check_config` then `homeassistant.reload_all`.
 
 Current required permissions:
 
 - Export: `homeassistant_api: true`; writable `addon_config` mounted at `/export`; no Ingress; `startup: once`; `boot: manual_only`.
-- Import: `homeassistant_api: true`; Ingress on internal port `8099`; read-only `addon_config` mounted at `/review`; no Docker, host network, or full access.
+- Import: `homeassistant_api: true`; Ingress on internal port `8099`; read-only `addon_config` mounted at `/review`; writable `homeassistant_config` at `/homeassistant` for Managed Files only; custom AppArmor; no Docker, host network, or full access.
 
 Do not weaken the Ingress-only request check in `import/app.py` without understanding the Supervisor proxy boundary.
 
@@ -155,10 +182,11 @@ The destination data repository and branch are currently fixed in code as `Barto
 Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 
 - GitHub access is read-only.
-- Only JSON files directly under `dashboards/` are considered.
-- Path traversal and nested paths are rejected.
-- Desired dashboard JSON is scanned for credential-like fields and URLs.
-- Status is derived from GitHub HEAD, current HA state, and the exported base hash.
+- Only JSON files directly under `dashboards/` are considered for dashboards.
+- Managed files are limited to the exact paths in `import/managed_files.yaml`.
+- Path traversal and nested dashboard paths are rejected.
+- Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs.
+- Status is derived from GitHub HEAD, current HA state, and the exported/base hash.
 - A registered dashboard without a base hash may bootstrap only when its current
   HA configuration is a semantically empty shell. Import labels this state
   `READY TO APPLY — NEW DASHBOARD`, carries the exact HA preview hash in the
@@ -167,11 +195,18 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
   base is labeled `IN SYNC — BASE NOT INITIALIZED` and offers an explicit
   Export retry. A non-empty dashboard without a base remains a conflict.
 - Apply is allowed only for `READY TO APPLY` or the guarded
-  `READY TO APPLY — NEW DASHBOARD` bootstrap state.
+  `READY TO APPLY — NEW DASHBOARD` bootstrap state (dashboards), or for managed
+  files `READY TO APPLY` / `READY TO APPLY — NO BASE` (explicit first Apply when
+  BASE is missing and LIVE already differs from Git).
+- Managed files that already match GitHub/HA but lack a base are
+  `IN SYNC — BASE NOT INITIALIZED`; **Initialize managed-file bases** only
+  adopts that in-sync case. Drift without a base is never auto-baselined.
 - Every POST refreshes GitHub and repeats the conflict check before saving.
-- Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
+- Dashboard Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
+- Managed-file Apply uses atomic filesystem writes under `/homeassistant` with
+  backup, read-back, config check (packages), activation/reload, and rollback.
 - Every save is read back and hash-verified.
-- After at least one verified Apply, Import fires `ha_config_sync_import_applied` once. The Home Assistant automation owns the installed Export App ID and starts Export; Import must not hard-code that ID.
+- After at least one verified **dashboard** Apply, Import fires `ha_config_sync_import_applied` once. The Home Assistant automation owns the installed Export App ID and starts Export; Import must not hard-code that ID. Managed-file Apply does not request Export.
 - A blocked or failed Apply must not request Export. If some selected dashboards succeed and others fail, request one Export after processing the whole selection.
 - Automations, scripts, and scenes are currently review/snapshot-only; do not add Apply support casually.
 

@@ -65,8 +65,20 @@ expected.each do |directory, (name, slug)|
   abort("#{relative} map must be a list") unless mappings.is_a?(Array)
   mappings.each do |mapping|
     next unless mapping.is_a?(Hash)
-    if %w[homeassistant_config all_addon_configs].include?(mapping["type"])
+    type = mapping["type"]
+    if type == "all_addon_configs"
       abort("#{relative} grants a forbidden broad mapping")
+    end
+    if type == "homeassistant_config"
+      unless directory == "import"
+        abort("#{relative} must not map homeassistant_config")
+      end
+      if mapping["read_only"] != false
+        abort("#{relative} homeassistant_config must be writable for Managed Files")
+      end
+      unless mapping["path"] == "/homeassistant"
+        abort("#{relative} homeassistant_config path must be /homeassistant")
+      end
     end
   end
 end
@@ -80,6 +92,24 @@ import_config = configs.fetch("import")
 unless import_config["ingress"] == true && import_config["homeassistant_api"] == true
   abort("Import requires Ingress and the Home Assistant API")
 end
+
+import_maps = Array(import_config["map"])
+ha_map = import_maps.find { |mapping| mapping.is_a?(Hash) && mapping["type"] == "homeassistant_config" }
+abort("Import must map writable homeassistant_config at /homeassistant for Managed Files") unless ha_map
+%w[apparmor.txt managed_files.yaml managed_files.py].each do |name|
+  abort("Import is missing #{name}") unless File.file?(File.join(root, "import", name))
+end
+apparmor = File.read(File.join(root, "import", "apparmor.txt"), encoding: "UTF-8")
+%w[.storage secrets.yaml custom_components].each do |needle|
+  ok = if needle == "secrets.yaml"
+         apparmor.include?("deny /homeassistant/secrets.yaml")
+       else
+         apparmor.include?("deny /homeassistant/#{needle}/**")
+       end
+  abort("import/apparmor.txt must deny sensitive path #{needle}") unless ok
+end
+policy = File.read(File.join(root, "import", "managed_files.yaml"), encoding: "UTF-8")
+abort("managed_files.yaml must not be empty") if policy.strip.empty?
 RUBY
 
 python3 - "$root" <<'PY'

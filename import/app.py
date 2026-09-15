@@ -19,6 +19,12 @@ from dashboard_logic import (
     matches_preview,
     parse_preview_hashes,
 )
+from managed_files import (
+    apply_managed_files,
+    collect_managed_changes,
+    initialize_missing_bases,
+    load_policy,
+)
 from visual_preview import prepare_preview
 
 
@@ -36,6 +42,14 @@ IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
 
 from security import unsafe_reason
+
+try:
+    HA_CONFIG_ROOT, MANAGED_ENTRIES = load_policy()
+except Exception as policy_error:  # Fail closed at import time with a clear message.
+    HA_CONFIG_ROOT, MANAGED_ENTRIES = Path("/homeassistant"), []
+    MANAGED_POLICY_ERROR = str(policy_error)
+else:
+    MANAGED_POLICY_ERROR = None
 
 
 TEMPLATE = r"""
@@ -123,7 +137,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </head>
 <body><main>
 <header>
-  <div><h1>HA Config Sync — Import</h1><div class="small">One GitHub file per dashboard · GitHub read-only · Apply via Home Assistant API · Export requested after verified Apply</div></div>
+  <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
   <form method="get"><button id="refresh-button" type="submit">Refresh GitHub</button></form>
 </header>
 
@@ -132,23 +146,34 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   <strong>Repository:</strong><span>BartoszWu/home-assistant-config</span>
   <strong>Branch:</strong><span>{{ branch }}</span>
   <strong>Commit:</strong><span>{{ commit }}</span>
-  <strong>Base state:</strong><span>state/dashboard-bases.json (SHA-256 only)</span>
+  <strong>Base state:</strong><span>state/dashboard-bases.json (dashboards) · /data/managed-file-bases.json (managed files)</span>
 </div>
+
+{% if managed_policy_error %}
+<div class="card error"><strong>Managed files policy error:</strong> {{ managed_policy_error }}</div>
+{% endif %}
 
 {% for result in results or [] %}
 <div class="result {% if not result.ok %}bad{% endif %}">{{ result.message }}</div>
 {% endfor %}
 
-{% if has_missing_base %}
+{% if has_missing_base or has_managed_missing_base %}
 <section class="card">
   <h3 style="margin-top:0">Base initialization needed</h3>
-  <p>GitHub and Home Assistant already match, but no exported base hash exists.</p>
-  <form method="post" action="export"><button type="submit">Request Export to initialize base</button></form>
+  {% if has_missing_base %}
+  <p>Dashboard: GitHub and Home Assistant already match, but no exported base hash exists.</p>
+  <form method="post" action="export" style="margin-bottom:12px"><button type="submit">Request Export to initialize dashboard base</button></form>
+  {% endif %}
+  {% if has_managed_missing_base %}
+  <p>Managed files: GitHub and HA already match, but no Import base hash exists.</p>
+  <form method="post" action="managed-base"><button type="submit">Initialize managed-file bases</button></form>
+  {% endif %}
 </section>
 {% endif %}
 
 <form id="apply-form" method="post" action="apply">
-{% if not changes %}<div class="card"><h2>No dashboard files</h2><p>Add JSON files directly under <code>dashboards/</code>.</p></div>{% endif %}
+{% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
+{% if changes %}<h2>Dashboards</h2>{% endif %}
 {% for change in changes %}
 <section class="card">
   <div class="change-head">
@@ -196,6 +221,42 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   </details>
 </section>
 {% endfor %}
+
+{% if managed_changes %}
+<h2>Managed files</h2>
+<p class="small">Desired state is Git → HA only. Bases live in Import <code>/data</code>. No automatic Export of these files.</p>
+{% for change in managed_changes %}
+<section class="card">
+  <div class="change-head">
+    {% if change.selectable %}
+    <input type="checkbox" name="managed_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
+    <input type="hidden" name="managed_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+    <input type="hidden" name="managed_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
+    {% endif %}
+    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
+    <span class="counts">{{ change.added }} added · {{ change.removed }} removed</span>
+  </div>
+  <div class="small">Profile · {{ change.profile }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
+  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
+  {% if change.staging and change.staging.preview_url %}
+  <p class="small">Staged frontend preview (does not replace production): <code>{{ change.staging.preview_url }}</code></p>
+  {% endif %}
+  {% if change.staging and change.staging.error %}
+  <p class="reason">Staging unavailable: {{ change.staging.error }}</p>
+  {% endif %}
+  <details {% if change.status != 'SAME' %}open{% endif %}>
+    <summary>Review changes</summary>
+    <div class="diff-wrap"><table class="diff">
+      <thead><tr><th colspan="2">HA current</th><th colspan="2">GitHub HEAD</th></tr></thead>
+      <tbody>{% for row in change.rows %}<tr>
+        <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
+        <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+  </details>
+</section>
+{% endfor %}
+{% endif %}
 <div class="actions">
   <button id="cancel-button" type="reset">Cancel</button>
   <div id="apply-progress" class="apply-progress" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Applying and verifying…</span></div>
@@ -210,9 +271,9 @@ if (form) {
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (form.dataset.submitting === 'true') return;
-    const selected = form.querySelectorAll('input[name="selected"]:checked');
+    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked');
     if (!selected.length) {
-      window.alert('Select at least one dashboard ready to apply.');
+      window.alert('Select at least one dashboard or managed file ready to apply.');
       return;
     }
     form.dataset.submitting = 'true';
@@ -437,25 +498,51 @@ def collect_changes():
     return changes
 
 
+def public_managed_change(change):
+    """Drop in-memory blobs before template render."""
+    return {
+        key: value for key, value in change.items()
+        if key not in {"github_data"}
+    }
+
+
 def render_review(results=None):
     error = None
     commit = "-"
     changes = []
+    managed_changes = []
     with REPO_LOCK:
         try:
             commit = refresh_repo()
             changes = collect_changes()
+            if MANAGED_ENTRIES and not MANAGED_POLICY_ERROR:
+                managed_changes, _bases = collect_managed_changes(
+                    WORKDIR,
+                    HA_CONFIG_ROOT,
+                    MANAGED_ENTRIES,
+                    unsafe_reason,
+                    stage_frontend=True,
+                )
+                managed_changes = [public_managed_change(item) for item in managed_changes]
         except Exception as exception:
             error = str(exception)
+    has_ready = any(change["selectable"] for change in changes) or any(
+        change["selectable"] for change in managed_changes
+    )
     return render_template_string(
         TEMPLATE,
         changes=changes,
+        managed_changes=managed_changes,
+        managed_policy_error=MANAGED_POLICY_ERROR,
         error=error,
         commit=commit,
         branch=BRANCH,
-        has_ready=any(change["selectable"] for change in changes),
+        has_ready=has_ready,
         has_missing_base=any(
             change["status"] == MISSING_BASE_STATUS for change in changes
+        ),
+        has_managed_missing_base=any(
+            change["status"] == MISSING_BASE_STATUS for change in managed_changes
         ),
         results=results or [],
         visual_preview_version=VISUAL_PREVIEW_VERSION,
@@ -470,63 +557,103 @@ def index():
 @app.route("/apply", methods=["POST"])
 def apply_selected():
     selected = request.form.getlist("selected")
-    if not selected:
-        return render_review([{"ok": False, "message": "No READY dashboard selected."}])
+    managed_selected = request.form.getlist("managed_selected")
+    if not selected and not managed_selected:
+        return render_review([{"ok": False, "message": "No READY item selected."}])
     if (
         len(selected) > 20
         or len(set(selected)) != len(selected)
         or any(not valid_relative(value) for value in selected)
     ):
         abort(400)
-    try:
-        previews = parse_preview_hashes(request.form.getlist("preview_hash"))
-        desired_previews = parse_preview_hashes(request.form.getlist("desired_hash"))
-    except ValueError:
+    allowed_managed = {entry.path for entry in MANAGED_ENTRIES}
+    if (
+        len(managed_selected) > 20
+        or len(set(managed_selected)) != len(managed_selected)
+        or any(value not in allowed_managed for value in managed_selected)
+    ):
         abort(400)
-    if any(relative not in previews or relative not in desired_previews for relative in selected):
+
+    previews = {}
+    desired_previews = {}
+    managed_previews = {}
+    managed_desired = {}
+    try:
+        if selected:
+            previews = parse_preview_hashes(request.form.getlist("preview_hash"))
+            desired_previews = parse_preview_hashes(request.form.getlist("desired_hash"))
+            if any(relative not in previews or relative not in desired_previews for relative in selected):
+                abort(400)
+        if managed_selected:
+            managed_previews = parse_preview_hashes(request.form.getlist("managed_preview_hash"))
+            managed_desired = parse_preview_hashes(request.form.getlist("managed_desired_hash"))
+            if any(
+                relative not in managed_previews or relative not in managed_desired
+                for relative in managed_selected
+            ):
+                abort(400)
+    except ValueError:
         abort(400)
 
     results = []
     applied = []
+    managed_applied = []
     with REPO_LOCK:
         try:
             refresh_repo()
-            fresh = {change["relative"]: change for change in collect_changes()}
-            for relative in selected:
-                change = fresh.get(relative)
-                if change and (not matches_preview(change["current"], previews[relative])
-                               or not matches_preview(change["github"], desired_previews[relative])):
+            if selected:
+                fresh = {change["relative"]: change for change in collect_changes()}
+                for relative in selected:
+                    change = fresh.get(relative)
+                    if change and (not matches_preview(change["current"], previews[relative])
+                                   or not matches_preview(change["github"], desired_previews[relative])):
+                        results.append({
+                            "ok": False,
+                            "message": (
+                                f"{relative}: HA or Git desired changed since preview. "
+                                "Refresh and review the new diff before Apply."
+                            ),
+                        })
+                        continue
+                    if not change or change["status"] not in APPLYABLE_STATUSES:
+                        status = change["status"] if change else "missing"
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: blocked by fresh conflict-check ({status}).",
+                        })
+                        continue
+                    if not matches_preview(ha_dashboard_config(relative), previews[relative]):
+                        results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
+                        continue
+                    save_dashboard(relative, change["github"])
+                    verified = ha_dashboard_config(relative)
+                    if digest(verified) != digest(change["github"]):
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: save returned, but read-back verification failed.",
+                        })
+                        continue
                     results.append({
-                        "ok": False,
-                        "message": (
-                            f"{relative}: HA or Git desired changed since preview. "
-                            "Refresh and review the new diff before Apply."
-                        ),
+                        "ok": True,
+                        "message": f"{relative}: Applied and verified.",
                     })
-                    continue
-                if not change or change["status"] not in APPLYABLE_STATUSES:
-                    status = change["status"] if change else "missing"
-                    results.append({
-                        "ok": False,
-                        "message": f"{relative}: blocked by fresh conflict-check ({status}).",
-                    })
-                    continue
-                if not matches_preview(ha_dashboard_config(relative), previews[relative]):
-                    results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
-                    continue
-                save_dashboard(relative, change["github"])
-                verified = ha_dashboard_config(relative)
-                if digest(verified) != digest(change["github"]):
-                    results.append({
-                        "ok": False,
-                        "message": f"{relative}: save returned, but read-back verification failed.",
-                    })
-                    continue
-                results.append({
-                    "ok": True,
-                    "message": f"{relative}: Applied and verified.",
-                })
-                applied.append(relative)
+                    applied.append(relative)
+            if managed_selected:
+                token = os.environ.get("SUPERVISOR_TOKEN")
+                if not token:
+                    raise RuntimeError("SUPERVISOR_TOKEN is unavailable.")
+                managed_results, managed_applied = apply_managed_files(
+                    managed_selected,
+                    managed_previews,
+                    managed_desired,
+                    WORKDIR,
+                    HA_CONFIG_ROOT,
+                    MANAGED_ENTRIES,
+                    unsafe_reason,
+                    ha_ws_call,
+                    token,
+                )
+                results.extend(managed_results)
         except Exception as exception:
             results.append({"ok": False, "message": f"Apply failed: {exception}"})
     if applied:
@@ -543,6 +670,41 @@ def apply_selected():
                     "Dashboards were applied, but automatic Export could not "
                     f"be requested: {exception}"
                 ),
+            })
+    if managed_applied and not applied:
+        results.append({
+            "ok": True,
+            "message": (
+                "Managed files applied. No automatic Export was requested "
+                "(managed files are Git → HA only)."
+            ),
+        })
+    return render_review(results)
+
+
+@app.route("/managed-base", methods=["POST"])
+def managed_initialize_bases():
+    results = []
+    with REPO_LOCK:
+        try:
+            refresh_repo()
+            initialized = initialize_missing_bases(
+                WORKDIR, HA_CONFIG_ROOT, MANAGED_ENTRIES, unsafe_reason
+            )
+            if initialized:
+                results.append({
+                    "ok": True,
+                    "message": "Initialized managed-file bases: " + ", ".join(initialized),
+                })
+            else:
+                results.append({
+                    "ok": False,
+                    "message": "No in-sync managed file with a missing base was found.",
+                })
+        except Exception as exception:
+            results.append({
+                "ok": False,
+                "message": f"Managed base initialization failed: {exception}",
             })
     return render_review(results)
 
