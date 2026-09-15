@@ -11,7 +11,7 @@ WS_URL = "ws://supervisor/core/websocket"
 OUTPUT_DIR = Path("/tmp/ha-current/dashboards")
 
 from security import unsafe_reason, safe_text
-from dashboard_manifest import resource_record, custom_dependencies
+from dashboard_manifest import resource_record, custom_dependencies, is_ephemeral_dashboard
 
 
 def ws_call(ws, message_id, message_type, **extra):
@@ -104,7 +104,9 @@ with connect(WS_URL, open_timeout=15) as ws:
         "source": "Home Assistant Lovelace WebSocket API",
         "dashboards": [],
         "scope_exclusions": [{"scope": "non_storage_dashboards", "status": "intentionally_excluded",
-                              "reason": "Built-in, default and YAML configurations are outside Export scope; the API list may omit them."}],
+                              "reason": "Built-in, default and YAML configurations are outside Export scope; the API list may omit them."},
+                             {"scope": "ephemeral_preview_dashboard", "status": "ephemeral_skipped",
+                              "reason": "dashboard-preview is ephemeral agent scratch space, never synced to Git."}],
     }
 
     for dashboard in dashboards:
@@ -130,6 +132,18 @@ with connect(WS_URL, open_timeout=15) as ws:
         title = safe_text(dashboard.get("title") or url_path or "Lovelace")
         if not isinstance(url_path, str) or not re.fullmatch(r"[a-z0-9_-]+", url_path) or unsafe_reason(url_path):
             index["dashboards"].append({"exported": False, "status": "security_excluded"})
+            continue
+
+        if is_ephemeral_dashboard(url_path):
+            print(
+                f"⏭️  Dashboard '{title}' skipped: "
+                "ephemeral preview dashboard is outside Export scope"
+            )
+            index["dashboards"].append({
+                "url_path": url_path,
+                "title": title,
+                "exported": False, "status": "ephemeral_skipped",
+                "reason": "ephemeral preview dashboard is outside Export scope"})
             continue
 
         message_id += 1

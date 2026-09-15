@@ -13,6 +13,7 @@ from dashboard_logic import (
     MISSING_BASE_STATUS,
     classify_with_provenance,
     digest,
+    is_ephemeral_dashboard,
     matches_preview,
     parse_preview_hashes,
 )
@@ -605,6 +606,8 @@ def ha_dashboard_config(relative):
 
 def save_dashboard(relative, desired):
     url_path = dashboard_url_path(relative)
+    if is_ephemeral_dashboard(relative) or is_ephemeral_dashboard(url_path):
+        raise RuntimeError("Refusing Apply to ephemeral preview dashboard.")
     payload = {"config": desired}
     if url_path:
         payload["url_path"] = url_path
@@ -692,6 +695,8 @@ def collect_changes(commit_sha="", revision=None):
     for github_path in sorted(root.glob("*.json")):
         relative = github_path.name
         if not valid_relative(relative):
+            continue
+        if is_ephemeral_dashboard(relative):
             continue
         github = load_json(github_path)
         current = ha_dashboard_config(relative)
@@ -895,6 +900,7 @@ def apply_selected():
         len(selected) > MAX_DASHBOARD_SELECTED
         or len(set(selected)) != len(selected)
         or any(not valid_relative(value) for value in selected)
+        or any(is_ephemeral_dashboard(value) for value in selected)
     ):
         abort(400)
     if (

@@ -35,3 +35,19 @@ def custom_dependencies(value):
     return sorted(found)
 
 
+# Ephemeral agent scratch dashboard. Never exported, synced, reviewed or
+# applied. Mirrored in import/dashboard_logic.py (separate container, no
+# shared module); keep both copies in sync.
+EPHEMERAL_DASHBOARD_URL_PATHS = frozenset({"dashboard-preview"})
+
+
+def is_ephemeral_dashboard(value):
+    """True for the ephemeral preview dashboard, given as url_path or filename."""
+    if not isinstance(value, str):
+        return False
+    name = value.rsplit("/", 1)[-1]
+    if name.endswith(".json"):
+        name = name[: -len(".json")]
+    return name in EPHEMERAL_DASHBOARD_URL_PATHS
+
+

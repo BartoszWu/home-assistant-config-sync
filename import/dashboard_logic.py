@@ -206,3 +206,19 @@ def parse_preview_hashes(values):
 
 def matches_preview(current, preview_hash):
     return bool(HASH_RE.fullmatch(preview_hash)) and digest(current) == preview_hash
+
+
+# Ephemeral agent scratch dashboard. Never exported, synced, reviewed or
+# applied. Mirrored in export/dashboard_manifest.py (separate container, no
+# shared module); keep both copies in sync.
+EPHEMERAL_DASHBOARD_URL_PATHS = frozenset({"dashboard-preview"})
+
+
+def is_ephemeral_dashboard(value):
+    """True for the ephemeral preview dashboard, given as url_path or filename."""
+    if not isinstance(value, str):
+        return False
+    name = value.rsplit("/", 1)[-1]
+    if name.endswith(".json"):
+        name = name[: -len(".json")]
+    return name in EPHEMERAL_DASHBOARD_URL_PATHS
