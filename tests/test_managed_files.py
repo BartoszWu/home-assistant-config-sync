@@ -372,6 +372,8 @@ class CollectTests(unittest.TestCase):
             self.assertEqual(changes[0]["status"], "READY TO APPLY")
             self.assertTrue(changes[0]["selectable"])
             self.assertIn("github_data", changes[0])
+            self.assertTrue(changes[0]["diff"]["blocks"])
+            self.assertGreater(changes[0]["added"] + changes[0]["removed"], 0)
 
 
 if __name__ == "__main__":

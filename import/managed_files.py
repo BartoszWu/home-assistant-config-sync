@@ -21,6 +21,7 @@ from dashboard_logic import (
     MISSING_BASE_STATUS,
     HASH_RE,
 )
+from diff_view import compare_text, empty as empty_diff, file_anchor, hunk_rows
 
 POLICY_PATH = Path(__file__).with_name("managed_files.yaml")
 BASES_PATH = Path("/data/managed-file-bases.json")
@@ -288,33 +289,23 @@ def set_base_hash(bases: dict, relative: str, sha256: str) -> None:
 
 
 def side_by_side_text(left: str, right: str):
-    import difflib
+    diff = compare_text(left, right)
+    return diff, diff["added"], diff["removed"]
 
-    left_lines = left.splitlines()
-    right_lines = right.splitlines()
-    matcher = difflib.SequenceMatcher(a=left_lines, b=right_lines)
-    rows = []
-    added = removed = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        left_part = left_lines[i1:i2]
-        right_part = right_lines[j1:j2]
-        width = max(len(left_part), len(right_part))
-        if tag in {"replace", "delete"}:
-            removed += len(left_part)
-        if tag in {"replace", "insert"}:
-            added += len(right_part)
-        for offset in range(width):
-            has_left = offset < len(left_part)
-            has_right = offset < len(right_part)
-            rows.append({
-                "left_no": i1 + offset + 1 if has_left else None,
-                "left": left_part[offset] if has_left else "",
-                "left_css": "left-del" if has_left and tag != "equal" else ("blank" if not has_left else ""),
-                "right_no": j1 + offset + 1 if has_right else None,
-                "right": right_part[offset] if has_right else "",
-                "right_css": "right-add" if has_right and tag != "equal" else ("blank" if not has_right else ""),
-            })
-    return rows, added, removed
+
+def _managed_review(entry: ManagedEntry, **fields) -> dict:
+    diff = fields.pop("diff", None) or empty_diff()
+    return {
+        "kind": "managed",
+        "relative": entry.path,
+        "profile": entry.profile,
+        "anchor": file_anchor("managed", entry.path),
+        "diff": diff,
+        "rows": hunk_rows(diff),
+        "added": diff["added"],
+        "removed": diff["removed"],
+        **fields,
+    }
 
 
 def decode_text(data: bytes) -> str:
@@ -524,23 +515,20 @@ def collect_managed_changes(
     for entry in entries:
         github_path = workdir / entry.path
         if not github_path.is_file():
-            changes.append({
-                "relative": entry.path,
-                "profile": entry.profile,
-                "status": "ERROR",
-                "css": "error",
-                "selectable": False,
-                "reason": "File missing from GitHub HEAD.",
-                "rows": [],
-                "added": 0,
-                "removed": 0,
-                "preview_ha_hash": "",
-                "preview_desired_hash": "",
-                "github_hash": None,
-                "live_hash": None,
-                "base": base_hash_for(bases, entry.path),
-                "staging": None,
-            })
+            changes.append(_managed_review(
+                entry,
+                status="ERROR",
+                css="error",
+                selectable=False,
+                reason="File missing from GitHub HEAD.",
+                diff=empty_diff(),
+                preview_ha_hash="",
+                preview_desired_hash="",
+                github_hash=None,
+                live_hash=None,
+                base=base_hash_for(bases, entry.path),
+                staging=None,
+            ))
             continue
         github_data = github_path.read_bytes()
         github_hash = file_digest(github_data)
@@ -550,23 +538,20 @@ def collect_managed_changes(
             github_text = decode_text(github_data)
             live_text = decode_text(live.data) if live.data is not None else ""
         except UnicodeDecodeError:
-            changes.append({
-                "relative": entry.path,
-                "profile": entry.profile,
-                "status": "ERROR",
-                "css": "error",
-                "selectable": False,
-                "reason": "File is not valid UTF-8.",
-                "rows": [],
-                "added": 0,
-                "removed": 0,
-                "preview_ha_hash": live.sha256 or "",
-                "preview_desired_hash": github_hash,
-                "github_hash": github_hash,
-                "live_hash": live.sha256,
-                "base": base_hash_for(bases, entry.path),
-                "staging": None,
-            })
+            changes.append(_managed_review(
+                entry,
+                status="ERROR",
+                css="error",
+                selectable=False,
+                reason="File is not valid UTF-8.",
+                diff=empty_diff(),
+                preview_ha_hash=live.sha256 or "",
+                preview_desired_hash=github_hash,
+                github_hash=github_hash,
+                live_hash=live.sha256,
+                base=base_hash_for(bases, entry.path),
+                staging=None,
+            ))
             continue
         if entry.profile == "package":
             try:
@@ -583,7 +568,7 @@ def collect_managed_changes(
             base_hash_for(bases, entry.path),
             unsafe=unsafe,
         )
-        rows, added, removed = side_by_side_text(live_text, github_text)
+        diff, _added, _removed = side_by_side_text(live_text, github_text)
         staging = None
         if stage_frontend and entry.profile == "frontend_module" and status in (
             MANAGED_APPLYABLE_STATUSES | {"SAME", MISSING_BASE_STATUS}
@@ -593,26 +578,23 @@ def collect_managed_changes(
                 staging = ensure_frontend_staging(ha_root, entry.path, github_data, github_hash)
             except Exception as error:
                 staging = {"error": str(error)}
-        changes.append({
-            "relative": entry.path,
-            "profile": entry.profile,
-            "status": status,
-            "css": css,
-            "selectable": selectable,
-            "reason": reason,
-            "rows": rows,
-            "added": added,
-            "removed": removed,
-            "preview_ha_hash": live.sha256 or ("0" * 64),
-            "preview_desired_hash": github_hash,
-            "github_hash": github_hash,
-            "live_hash": live.sha256,
-            "base": base_hash_for(bases, entry.path),
-            "github_data": github_data,
-            "live_exists": live.exists,
-            "staging": staging,
-            "absent_live_token": "absent" if not live.exists else None,
-        })
+        changes.append(_managed_review(
+            entry,
+            status=status,
+            css=css,
+            selectable=selectable,
+            reason=reason,
+            diff=diff,
+            preview_ha_hash=live.sha256 or ("0" * 64),
+            preview_desired_hash=github_hash,
+            github_hash=github_hash,
+            live_hash=live.sha256,
+            base=base_hash_for(bases, entry.path),
+            github_data=github_data,
+            live_exists=live.exists,
+            staging=staging,
+            absent_live_token="absent" if not live.exists else None,
+        ))
     return changes, bases
 
 

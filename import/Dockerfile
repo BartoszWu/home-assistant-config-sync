@@ -21,6 +21,7 @@ RUN apk add --no-cache \
 
 COPY app.py /app.py
 COPY dashboard_logic.py /dashboard_logic.py
+COPY diff_view.py /diff_view.py
 COPY visual_preview.py /visual_preview.py
 COPY managed_files.py /managed_files.py
 COPY managed_files.yaml /managed_files.yaml
