@@ -22,6 +22,7 @@ from dashboard_logic import (
     HASH_RE,
 )
 from diff_view import compare_text, empty as empty_diff, file_anchor, hunk_rows
+from review_warnings import format_scan_warnings
 
 POLICY_PATH = Path(__file__).with_name("managed_files.yaml")
 BASES_PATH = Path("/data/managed-file-bases.json")
@@ -183,8 +184,6 @@ def read_snapshot(path: Path) -> FileSnapshot:
 
 def classify_file(github_hash: str, live_hash: str | None, base: str | None, unsafe=None):
     """Three-way classify using content SHA-256 hashes (None = LIVE absent)."""
-    if unsafe:
-        return "UNSAFE", "unsafe", False, unsafe
     if base is None:
         if live_hash is None:
             return (
@@ -522,6 +521,7 @@ def collect_managed_changes(
                 selectable=False,
                 reason="File missing from GitHub HEAD.",
                 diff=empty_diff(),
+                warnings=[],
                 preview_ha_hash="",
                 preview_desired_hash="",
                 github_hash=None,
@@ -545,6 +545,7 @@ def collect_managed_changes(
                 selectable=False,
                 reason="File is not valid UTF-8.",
                 diff=empty_diff(),
+                warnings=[],
                 preview_ha_hash=live.sha256 or "",
                 preview_desired_hash=github_hash,
                 github_hash=github_hash,
@@ -557,17 +558,22 @@ def collect_managed_changes(
             try:
                 parsed = yaml.safe_load(github_text)
             except yaml.YAMLError:
-                unsafe = "invalid YAML"
+                scan_value = None
+                parse_error = "invalid YAML"
             else:
-                unsafe = unsafe_reason(parsed)
+                scan_value = parsed
+                parse_error = None
         else:
-            unsafe = unsafe_reason(github_text)
+            scan_value = github_text
+            parse_error = None
+        warnings = format_scan_warnings(scan_value, github_text) if scan_value is not None else []
         status, css, selectable, reason = classify_file(
             github_hash,
             live.sha256,
             base_hash_for(bases, entry.path),
-            unsafe=unsafe,
         )
+        if parse_error:
+            status, css, selectable, reason = "ERROR", "error", False, parse_error
         diff, _added, _removed = side_by_side_text(live_text, github_text)
         staging = None
         if stage_frontend and entry.profile == "frontend_module" and status in (
@@ -585,6 +591,7 @@ def collect_managed_changes(
             selectable=selectable,
             reason=reason,
             diff=diff,
+            warnings=warnings,
             preview_ha_hash=live.sha256 or ("0" * 64),
             preview_desired_hash=github_hash,
             github_hash=github_hash,
@@ -656,9 +663,6 @@ def apply_managed_files(
                         "Refresh and review before Apply."
                     ),
                 })
-                continue
-            if unsafe_reason(decode_text(change["github_data"])):
-                results.append({"ok": False, "message": f"{relative}: blocked by security scan."})
                 continue
             # Fresh LIVE hash immediately before write.
             live_path = resolve_live_path(ha_root, relative)

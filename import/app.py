@@ -31,6 +31,7 @@ from managed_files import (
     initialize_missing_bases,
     load_policy,
 )
+from review_warnings import format_scan_warnings
 from visual_preview import prepare_preview
 
 
@@ -236,11 +237,16 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <input type="hidden" name="preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
       <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
-    <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
+    <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
   <div class="small">Dashboard · dashboards/{{ change.relative }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
+  {% if change.warnings %}
+  <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
+    {% for warning in change.warnings %}<br>{% if warning.line %}Line {{ warning.line }}: {% endif %}{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
+  </p>
+  {% endif %}
   <details {% if change.status != 'SAME' %}open{% endif %}>
     <summary>Review changes</summary>
     {% if change.visual %}
@@ -277,11 +283,16 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <input type="hidden" name="managed_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
     <input type="hidden" name="managed_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
-    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
+    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
   <div class="small">Profile · {{ change.profile }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
+  {% if change.warnings %}
+  <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
+    {% for warning in change.warnings %}<br>{% if warning.line %}Line {{ warning.line }}: {% endif %}{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
+  </p>
+  {% endif %}
   {% if change.staging and change.staging.preview_url %}
   <p class="small">Staged frontend preview (does not replace production): <code>{{ change.staging.preview_url }}</code></p>
   {% endif %}
@@ -541,8 +552,8 @@ def collect_changes():
             github,
             current,
             base,
-            unsafe=unsafe_reason(github),
         )
+        warnings = format_scan_warnings(github, "\n".join(pretty_lines(github)))
         changes.append({
             "visual": prepare_preview(relative, current, github, unsafe_reason),
             "name": github_path.stem,
@@ -556,6 +567,7 @@ def collect_changes():
             "css": css,
             "selectable": selectable,
             "reason": reason,
+            "warnings": warnings,
             **dashboard_review_fields(relative, current, github),
         })
     return changes
