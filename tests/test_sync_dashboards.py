@@ -181,3 +181,14 @@ class SyncGuardTests(unittest.TestCase):
         self.assertEqual(outcomes[DASH_2]["action"], "SKIPPED")
         self.assertEqual(load_json(self.repo / "dashboards" / DASH_1), self.main_a)
         self.assertEqual(load_json(self.repo / "dashboards" / DASH_2), self.main_a)
+
+    def test_ephemeral_preview_dashboard_is_skipped_before_sync(self):
+        self.write_live("dashboard-preview.json", dashboard("Preview"))
+        self.write_live(DASH_1, self.live_b)
+        outcomes = sync(self.repo, self.current, provenance=empty_store())
+        self.assertEqual(outcomes["dashboard-preview.json"]["action"], "SKIPPED")
+        self.assertIn("ephemeral", outcomes["dashboard-preview.json"]["reason"])
+        self.assertFalse((self.repo / "dashboards/dashboard-preview.json").exists())
+        bases = load_json(self.repo / "state/dashboard-bases.json")
+        self.assertNotIn("dashboard-preview.json", bases["dashboards"])
+        self.assertEqual(outcomes[DASH_1]["action"], "HA_CHANGE")

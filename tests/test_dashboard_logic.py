@@ -14,6 +14,7 @@ from dashboard_logic import (  # noqa: E402
     classify_with_provenance,
     digest,
     is_empty_dashboard,
+    is_ephemeral_dashboard,
     matches_preview,
     parse_preview_hashes,
 )
@@ -209,6 +210,18 @@ class DashboardLogicTests(unittest.TestCase):
                     f"dashboard-agd.json:{expected}",
                 ]
             )
+
+
+class EphemeralDashboardTests(unittest.TestCase):
+    def test_matches_url_path_and_filename(self):
+        self.assertTrue(is_ephemeral_dashboard("dashboard-preview"))
+        self.assertTrue(is_ephemeral_dashboard("dashboard-preview.json"))
+
+    def test_rejects_lookalikes_and_non_strings(self):
+        for value in ("dashboard-preview2", "dashboard-preview2.json",
+                      "dashboard-preview-old.json", "dashboard-temperatura.json",
+                      "", None, 42, {"x": 1}):
+            self.assertFalse(is_ephemeral_dashboard(value), value)
 
 
 if __name__ == "__main__":

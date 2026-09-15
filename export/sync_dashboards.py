@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from deployment_provenance import dashboard_sync_decision, empty_store
+from dashboard_manifest import is_ephemeral_dashboard
 
 
 STATE_RELATIVE = Path("state/dashboard-bases.json")
@@ -79,6 +80,13 @@ def sync(repo, current_root, provenance=None):
 
     for current_path in current_files:
         relative = current_path.name
+        if is_ephemeral_dashboard(relative):
+            print(f"SKIPPED {relative}: ephemeral preview dashboard is outside Export scope")
+            outcomes[relative] = {
+                "action": "SKIPPED",
+                "reason": "ephemeral preview dashboard is outside Export scope",
+            }
+            continue
         destination = destination_root / relative
         current = load_json(current_path)
         current_hash = digest(current)
