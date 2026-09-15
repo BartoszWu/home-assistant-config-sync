@@ -11,7 +11,7 @@ from websocket import create_connection
 from dashboard_logic import (
     APPLYABLE_STATUSES,
     MISSING_BASE_STATUS,
-    classify,
+    classify_with_provenance,
     digest,
     matches_preview,
     parse_preview_hashes,
@@ -30,6 +30,16 @@ from git_source import (
     SourceRevision,
     checkout_source,
     parse_requested_source,
+)
+from deployment_provenance import (
+    IMPORT_STATE_PATH,
+    SHARED_STATE_PATH,
+    adopt_canonical,
+    is_canonical_source,
+    load_import_store,
+    provenance_label,
+    record_artifacts,
+    save_store,
 )
 from managed_files import (
     apply_managed_files,
@@ -309,7 +319,8 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
-  <div class="small">Dashboard · dashboards/{{ change.relative }} · source {{ git_source.short_sha if git_source else '-' }}</div>
+  <div class="small">Dashboard · dashboards/{{ change.relative }} · review {{ git_source.short_sha if git_source else '-' }}</div>
+  <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
   <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
@@ -355,7 +366,8 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
   </div>
-  <div class="small">Profile · {{ change.profile }} · source {{ git_source.short_sha if git_source else '-' }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
+  <div class="small">Profile · {{ change.profile }} · review {{ git_source.short_sha if git_source else '-' }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
+  <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
   <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
@@ -630,9 +642,33 @@ def valid_relative(value):
     return len(path.parts) == 1 and path.suffix == ".json" and ".." not in path.parts
 
 
-def collect_changes(commit_sha=""):
+def persist_provenance(store):
+    return save_store(
+        store,
+        local_path=IMPORT_STATE_PATH,
+        shared_path=SHARED_STATE_PATH,
+    )
+
+
+def live_provenance_store():
+    return load_import_store(
+        local_path=IMPORT_STATE_PATH,
+        shared_path=SHARED_STATE_PATH,
+    )
+
+
+def collect_changes(commit_sha="", revision=None):
+    if revision is not None:
+        commit_sha = revision.commit_sha
+        reviewing_canonical = is_canonical_source(
+            revision.source_ref, revision.source_kind
+        )
+    else:
+        reviewing_canonical = False
     root = WORKDIR / "dashboards"
     bases = load_bases()
+    store = live_provenance_store()
+    pending_adopt = []
     changes = []
     if not root.exists():
         return changes
@@ -643,11 +679,16 @@ def collect_changes(commit_sha=""):
         github = load_json(github_path)
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
-        status, css, selectable, reason = classify(
+        live_entry = store.dashboards.get(relative)
+        status, css, selectable, reason, should_adopt = classify_with_provenance(
             github,
             current,
             base,
+            reviewing_canonical=reviewing_canonical,
+            provenance=live_entry,
         )
+        if should_adopt and revision is not None:
+            pending_adopt.append((relative, digest(current)))
         warnings = format_scan_warnings(github, "\n".join(pretty_lines(github)))
         changes.append({
             "visual": prepare_preview(relative, current, github, unsafe_reason),
@@ -664,8 +705,35 @@ def collect_changes(commit_sha=""):
             "reason": reason,
             "warnings": warnings,
             "source_sha": commit_sha,
+            "provenance_label": provenance_label(live_entry),
+            "live_source_ref": None if live_entry is None else live_entry.source_ref,
+            "live_short_sha": None if live_entry is None else live_entry.short_sha(),
             **dashboard_review_fields(relative, current, github),
         })
+    if pending_adopt and revision is not None:
+        try:
+            for relative, content_hash in pending_adopt:
+                store = adopt_canonical(
+                    store,
+                    relative=relative,
+                    commit_sha=revision.commit_sha,
+                    content_hash=content_hash,
+                )
+            persist_provenance(store)
+            adopted = {name for name, _hash in pending_adopt}
+            for change in changes:
+                if change["relative"] not in adopted:
+                    continue
+                live_entry = store.dashboards[change["relative"]]
+                change["status"] = "SAME"
+                change["css"] = "same"
+                change["selectable"] = False
+                change["reason"] = "LIVE matches main — marked CANONICAL MAIN."
+                change["provenance_label"] = provenance_label(live_entry)
+                change["live_source_ref"] = live_entry.source_ref
+                change["live_short_sha"] = live_entry.short_sha()
+        except OSError:
+            pass
     return changes
 
 
@@ -731,7 +799,7 @@ def render_review(results=None, *, source=None, pin_sha=None):
                 )
             else:
                 revision = coerce_revision(revision, requested_ref)
-            changes = collect_changes(revision.commit_sha)
+            changes = collect_changes(revision=revision)
             entries = managed_entries_for_revision()
             if entries and not MANAGED_POLICY_ERROR:
                 managed_changes, _bases = collect_managed_changes(
@@ -742,6 +810,16 @@ def render_review(results=None, *, source=None, pin_sha=None):
                     stage_frontend=True,
                     commit_sha=revision.commit_sha,
                 )
+                managed_store = live_provenance_store()
+                for item in managed_changes:
+                    live_entry = managed_store.managed_files.get(item["relative"])
+                    item["provenance_label"] = provenance_label(live_entry)
+                    item["live_source_ref"] = (
+                        None if live_entry is None else live_entry.source_ref
+                    )
+                    item["live_short_sha"] = (
+                        None if live_entry is None else live_entry.short_sha()
+                    )
                 managed_changes = [public_managed_change(item) for item in managed_changes]
         except InvalidSourceRef as exception:
             error = str(exception)
@@ -871,7 +949,7 @@ def apply_selected():
             if selected:
                 fresh = {
                     change["relative"]: change
-                    for change in collect_changes(revision.commit_sha)
+                    for change in collect_changes(revision=revision)
                 }
                 for relative in selected:
                     change = fresh.get(relative)
@@ -928,6 +1006,20 @@ def apply_selected():
                 results.extend(managed_results)
             if applied or managed_applied:
                 try:
+                    store = record_artifacts(
+                        live_provenance_store(),
+                        source_ref=revision.source_ref,
+                        source_kind=revision.source_kind,
+                        commit_sha=revision.commit_sha,
+                        dashboards={
+                            relative: desired_previews[relative] for relative in applied
+                        },
+                        managed_files={
+                            relative: managed_desired[relative]
+                            for relative in managed_applied
+                        },
+                    )
+                    persist_provenance(store)
                     record_last_apply(
                         source_ref=revision.source_ref,
                         commit_sha=revision.commit_sha,
@@ -1005,7 +1097,7 @@ def export_missing_bases():
             revision = coerce_revision(refresh_repo(requested_ref), requested_ref)
             missing = [
                 change["relative"]
-                for change in collect_changes(revision.commit_sha)
+                for change in collect_changes(revision=revision)
                 if change["status"] == MISSING_BASE_STATUS
             ]
             if missing:

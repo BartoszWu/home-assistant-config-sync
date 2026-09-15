@@ -44,6 +44,7 @@ profile ha_config_sync_import flags=(attach_disconnected,mediate_deleted) {
   /managed_files.py r,
   /managed_files.yaml r,
   /git_source.py r,
+  /deployment_provenance.py r,
   /security.py r,
   /run.sh rix,
   /static/** r,

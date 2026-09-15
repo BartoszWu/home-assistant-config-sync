@@ -93,6 +93,8 @@ class InventoryTests(unittest.TestCase):
     def test_security_module_mirrors_match(self):
         self.assertEqual((ROOT / 'export/security.py').read_bytes(),
                          (ROOT / 'import/security.py').read_bytes())
+        self.assertEqual((ROOT / 'export/deployment_provenance.py').read_bytes(),
+                         (ROOT / 'import/deployment_provenance.py').read_bytes())
 
 class PublicationGateTests(unittest.TestCase):
     def test_unknown_fields_and_markdown_drift_block_publication(self):

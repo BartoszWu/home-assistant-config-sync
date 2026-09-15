@@ -70,14 +70,19 @@ expected.each do |directory, (name, slug)|
       abort("#{relative} grants a forbidden broad mapping")
     end
     if type == "homeassistant_config"
-      unless directory == "import"
-        abort("#{relative} must not map homeassistant_config")
-      end
-      if mapping["read_only"] != false
-        abort("#{relative} homeassistant_config must be writable for Managed Files")
-      end
       unless mapping["path"] == "/homeassistant"
         abort("#{relative} homeassistant_config path must be /homeassistant")
+      end
+      if directory == "import"
+        if mapping["read_only"] != false
+          abort("#{relative} homeassistant_config must be writable for Managed Files")
+        end
+      elsif directory == "export"
+        if mapping["read_only"] != true
+          abort("#{relative} homeassistant_config must be read-only for LIVE provenance")
+        end
+      else
+        abort("#{relative} must not map homeassistant_config")
       end
     end
   end
@@ -92,6 +97,10 @@ import_config = configs.fetch("import")
 unless import_config["ingress"] == true && import_config["homeassistant_api"] == true
   abort("Import requires Ingress and the Home Assistant API")
 end
+
+export_maps = Array(export_config["map"])
+export_ha_map = export_maps.find { |mapping| mapping.is_a?(Hash) && mapping["type"] == "homeassistant_config" }
+abort("Export must map read-only homeassistant_config at /homeassistant for LIVE provenance") unless export_ha_map
 
 import_maps = Array(import_config["map"])
 ha_map = import_maps.find { |mapping| mapping.is_a?(Hash) && mapping["type"] == "homeassistant_config" }
@@ -150,6 +159,8 @@ from pathlib import Path
 root = Path(sys.argv[1])
 if (root / "export/security.py").read_bytes() != (root / "import/security.py").read_bytes():
     raise SystemExit("Security build-context mirrors differ")
+if (root / "export/deployment_provenance.py").read_bytes() != (root / "import/deployment_provenance.py").read_bytes():
+    raise SystemExit("deployment_provenance.py build-context mirrors differ")
 
 for path in root.rglob("*.json"):
     if ".git" not in path.parts:

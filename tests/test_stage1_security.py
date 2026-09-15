@@ -112,7 +112,9 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
                      'reviewed_sha': REVIEW_SHA}
         for p in [patch.object(app, 'WORKDIR', self.repo),
                   patch.object(app, 'refresh_repo', return_value=fake_revision()),
-                  patch.object(app, 'ha_dashboard_config', side_effect=lambda _: copy.deepcopy(self.live))]:
+                  patch.object(app, 'ha_dashboard_config', side_effect=lambda _: copy.deepcopy(self.live)),
+                  patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
+                  patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / 'www/.config-sync/live-dashboards.json')]:
             p.start()
             self.addCleanup(p.stop)
 
@@ -170,6 +172,91 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         with patch.object(app, 'save_dashboard') as save:
             self.assertEqual(self.submit().status_code, 400)
             save.assert_not_called()
+
+    def test_main_apply_records_canonical_provenance(self):
+        app = self.app_module
+        def save(_, value):
+            self.live = copy.deepcopy(value)
+        with patch.object(app, 'save_dashboard', side_effect=save), patch.object(app, 'request_export'):
+            self.submit()
+        from deployment_provenance import load_json_store
+        store = load_json_store(app.IMPORT_STATE_PATH)
+        entry = store.dashboards['test.json']
+        self.assertTrue(entry.canonical)
+        self.assertEqual(entry.source_ref, 'main')
+        self.assertEqual(entry.commit_sha, REVIEW_SHA)
+        self.assertTrue(app.SHARED_STATE_PATH.exists())
+
+    def test_feature_apply_records_non_canonical_and_still_requests_export(self):
+        app = self.app_module
+        feature_sha = 'e' * 40
+        self.form['source'] = 'feature/temp-redesign'
+        self.form['reviewed_sha'] = feature_sha
+        def save(_, value):
+            self.live = copy.deepcopy(value)
+        with patch.object(app, 'refresh_repo', return_value=fake_revision(
+                source_ref='feature/temp-redesign', commit_sha=feature_sha)), \
+             patch.object(app, 'save_dashboard', side_effect=save) as saved, \
+             patch.object(app, 'request_export') as export:
+            response = self.submit()
+        saved.assert_called_once()
+        export.assert_called_once_with(['test.json'])
+        from deployment_provenance import load_json_store
+        entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
+        self.assertFalse(entry.canonical)
+        self.assertEqual(entry.source_ref, 'feature/temp-redesign')
+        html = response.get_data(as_text=True)
+        self.assertIn('NON-CANONICAL', html)
+
+    def test_main_refresh_adopts_when_live_equals_main(self):
+        app = self.app_module
+        from deployment_provenance import empty_store, record_artifacts, save_store, load_json_store
+        self.live = copy.deepcopy(self.desired)
+        save_store(
+            record_artifacts(
+                empty_store(),
+                source_ref='feature/temp-redesign',
+                source_kind='branch',
+                commit_sha='e' * 40,
+                dashboards={'test.json': app.digest(self.desired)},
+            ),
+            local_path=app.IMPORT_STATE_PATH,
+            shared_path=app.SHARED_STATE_PATH,
+        )
+        html = app.app.test_client().get(
+            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+        ).get_data(as_text=True)
+        entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
+        self.assertTrue(entry.canonical)
+        self.assertEqual(entry.source_ref, 'main')
+        self.assertIn('CANONICAL MAIN', html)
+        self.assertIn('marked CANONICAL MAIN', html)
+
+    def test_main_refresh_does_not_adopt_when_main_still_differs(self):
+        app = self.app_module
+        from deployment_provenance import empty_store, record_artifacts, save_store, load_json_store
+        self.path.write_text(json.dumps(self.live))
+        drifted = {'views': [{'title': 'Feature LIVE'}]}
+        self.live = drifted
+        save_store(
+            record_artifacts(
+                empty_store(),
+                source_ref='feature/temp-redesign',
+                source_kind='branch',
+                commit_sha='e' * 40,
+                dashboards={'test.json': app.digest(drifted)},
+            ),
+            local_path=app.IMPORT_STATE_PATH,
+            shared_path=app.SHARED_STATE_PATH,
+        )
+        html = app.app.test_client().get(
+            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+        ).get_data(as_text=True)
+        entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
+        self.assertFalse(entry.canonical)
+        self.assertEqual(entry.source_ref, 'feature/temp-redesign')
+        self.assertIn('NON-CANONICAL', html)
+        self.assertIn('LIVE FROM FEATURE', html)
 
 class ResourcePolicyTests(unittest.TestCase):
     def test_hacs_resource_drops_version_without_false_mac_exclusion(self):

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from security import unsafe_reason
 from inventory import retain_unobserved_metadata, render_markdown
+from deployment_provenance import load_export_store
 from sync_dashboards import digest, load_json, write_json, sync
 
 
@@ -89,11 +90,17 @@ def publish(repo, source=Path('/export'), dashboards=Path('/tmp/ha-current/dashb
         sections['managed_config']['retained_previous'] = True
     if sections['dashboards']['complete']:
         manifest = load_json(dashboards / 'index.json')
+        provenance = load_export_store()
+        outcomes = {}
         if any(x.get('exported') for x in manifest['dashboards']):
-            sync(repo, dashboards)
+            outcomes = sync(repo, dashboards, provenance=provenance)
         for record in manifest['dashboards']:
             filename = record.get('file')
-            if filename:
+            outcome = outcomes.get(filename) if filename else None
+            if outcome and outcome.get('action') == 'SKIPPED':
+                record['git_ha_status'] = 'SKIPPED_NON_CANONICAL'
+                record['canonical_sync'] = outcome.get('reason') or 'SKIPPED'
+            elif filename:
                 desired = repo / 'dashboards' / filename
                 record['git_ha_status'] = 'SAME' if desired.exists() and digest(load_json(desired)) == digest(load_json(dashboards / filename)) else 'DIFFERENT'
             else:

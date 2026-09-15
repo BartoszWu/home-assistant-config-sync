@@ -54,8 +54,8 @@ Current product identity:
 
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
-| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `config.yaml` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.6.0` |
+| `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.8.0` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.7.0` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -97,6 +97,14 @@ Do not add any of the following unless the user explicitly approves a reviewed a
   `source_ref`, `commit_sha`, content hash and timestamp; this is metadata, not
   a merge. Do not add Export round-trip for these files without a new reviewed
   decision.
+- Per-dashboard LIVE provenance is written by Import after a verified Apply to
+  `/data/dashboard-provenance.json` and
+  `/homeassistant/www/.config-sync/live-dashboards.json`. Export may mount
+  read-only `homeassistant_config` solely to read that shared provenance file
+  (and caches a copy in Export `/data`). Git cannot declare a feature branch
+  canonical. `canonical` requires `source_ref == main` (the configured
+  canonical branch) plus Import recording after Apply or after LIVE hash equals
+  Git `main`. Feature deployments must not update `state/dashboard-bases.json`.
 - Frontend modules may be staged under `www/.config-sync-preview/<commit-sha>/`
   preserving the path under `www/` so relative ES module imports work. Apply
   alone may update the canonical `www/` path.
@@ -105,7 +113,9 @@ Do not add any of the following unless the user explicitly approves a reviewed a
 
 Current required permissions:
 
-- Export: `homeassistant_api: true`; writable `addon_config` mounted at `/export`; no Ingress; `startup: once`; `boot: manual_only`.
+- Export: `homeassistant_api: true`; writable `addon_config` mounted at `/export`;
+  read-only `homeassistant_config` at `/homeassistant` for LIVE dashboard
+  provenance only; no Ingress; `startup: once`; `boot: manual_only`.
 - Import: `homeassistant_api: true`; Ingress on internal port `8099`; read-only `addon_config` mounted at `/review`; writable `homeassistant_config` at `/homeassistant` for Managed Files only; custom AppArmor; no Docker, host network, or full access.
 
 Do not weaken the Ingress-only request check in `import/app.py` without understanding the Supervisor proxy boundary.
@@ -162,6 +172,10 @@ Export is a one-shot job. Preserve these properties:
 - No commit is created when the staged export is unchanged.
 - A pending GitHub dashboard change must not be overwritten by Export.
 - Dashboard deletion is never automatic.
+- Export must not write a LIVE dashboard (or its canonical BASE) to `main` when
+  Import provenance says that dashboard is a non-canonical feature deployment.
+  Inventory, runtime snapshots and other complete sections still publish.
+  Missing provenance keeps the previous canonical-main behaviour.
 
 The destination data repository and branch are currently fixed in code as `BartoszWu/home-assistant-config`, branch `main`.
 
@@ -190,7 +204,10 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
   current session only and is not saved as a new default. Apply is pinned to the
   reviewed SHA. If a branch tip moves after preview, Import refuses with
   `SOURCE UPDATED — REFRESH REVIEW` and does not apply the new tip silently.
-  Import never merges or pushes.
+  Import never merges or pushes. After a verified Apply, Import records
+  per-dashboard LIVE provenance (`canonical` only when the source is `main`).
+  Refreshing `main` when LIVE hash equals Git `main` adopts that dashboard as
+  CANONICAL MAIN without rewriting identical content.
 - Only JSON files directly under `dashboards/` are considered for dashboards.
 - Managed files are limited to exact paths and prefix rules in
   `import/managed_files.yaml`. Prefix rules may discover `.js`/`.mjs` files
@@ -218,7 +235,7 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Managed-file Apply uses atomic filesystem writes under `/homeassistant` with
   backup, read-back, config check (packages), activation/reload, and rollback.
 - Every save is read back and hash-verified.
-- After at least one verified **dashboard** Apply, Import fires `ha_config_sync_import_applied` once. The Home Assistant automation owns the installed Export App ID and starts Export; Import must not hard-code that ID. Managed-file Apply does not request Export.
+- After at least one verified **dashboard** Apply, Import fires `ha_config_sync_import_applied` once. The Home Assistant automation owns the installed Export App ID and starts Export; Import must not hard-code that ID. Managed-file Apply does not request Export. Auto-Export after a feature-branch Apply is still allowed because Export skips non-canonical dashboards.
 - A blocked or failed Apply must not request Export. If some selected dashboards succeed and others fail, request one Export after processing the whole selection.
 - Automations, scripts, and scenes are currently review/snapshot-only; do not add Apply support casually.
 
