@@ -375,6 +375,30 @@ class CollectTests(unittest.TestCase):
             self.assertTrue(changes[0]["diff"]["blocks"])
             self.assertGreater(changes[0]["added"] + changes[0]["removed"], 0)
 
+    def test_unique_id_warns_but_stays_selectable_without_base(self):
+        yaml_text = "template:\n  - sensor:\n      - unique_id: synthetic_unique\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "git"
+            (work / "packages").mkdir(parents=True)
+            (root / "packages").mkdir()
+            (work / "packages" / "temperatura.yaml").write_text(yaml_text, encoding="utf-8")
+            (root / "packages" / "temperatura.yaml").write_text("x: 0\n", encoding="utf-8")
+            bases_path = root / "bases.json"
+            with mock.patch.object(mf, "BASES_PATH", bases_path):
+                changes, _ = mf.collect_managed_changes(
+                    work,
+                    root,
+                    [mf.ManagedEntry("packages/temperatura.yaml", "package")],
+                    unsafe_none,
+                    stage_frontend=False,
+                )
+            self.assertEqual(changes[0]["status"], MANAGED_BOOTSTRAP_STATUS)
+            self.assertTrue(changes[0]["selectable"])
+            self.assertEqual(changes[0]["warnings"][0]["field"], "unique_id")
+            self.assertEqual(changes[0]["warnings"][0]["line"], 3)
+            self.assertNotIn("synthetic_unique", str(changes[0]["warnings"]))
+
 
 if __name__ == "__main__":
     unittest.main()

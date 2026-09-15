@@ -89,8 +89,6 @@ def is_empty_dashboard(config):
 def classify(github, current, base, unsafe=None):
     github_hash = digest(github)
     current_hash = digest(current)
-    if unsafe:
-        return "UNSAFE", "unsafe", False, unsafe
     if base is None:
         if github_hash == current_hash:
             return (

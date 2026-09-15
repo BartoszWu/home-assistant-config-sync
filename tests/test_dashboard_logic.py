@@ -121,15 +121,15 @@ class DashboardLogicTests(unittest.TestCase):
         self.assertEqual(status, "CONFLICT")
         self.assertFalse(selectable)
 
-    def test_unsafe_configuration_wins_over_bootstrap(self):
+    def test_unsafe_configuration_does_not_block_bootstrap(self):
         status, _, selectable, _ = classify(
             DESIRED_DASHBOARD,
             EMPTY_DASHBOARD,
             None,
             unsafe="Sensitive field detected",
         )
-        self.assertEqual(status, "UNSAFE")
-        self.assertFalse(selectable)
+        self.assertEqual(status, BOOTSTRAP_STATUS)
+        self.assertTrue(selectable)
 
     def test_in_sync_without_base_can_recover_export(self):
         status, css, selectable, _ = classify(

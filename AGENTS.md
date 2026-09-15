@@ -55,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `config.yaml` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.5.1` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.5.2` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -185,7 +185,7 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Only JSON files directly under `dashboards/` are considered for dashboards.
 - Managed files are limited to the exact paths in `import/managed_files.yaml`.
 - Path traversal and nested dashboard paths are rejected.
-- Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs.
+- Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs. Hits are review warnings with field path and source line; they do not hide the Apply checkbox. Apply still requires explicit selection, a fresh conflict check, and read-back verification. Warnings never echo matched values.
 - Status is derived from GitHub HEAD, current HA state, and the exported/base hash.
 - A registered dashboard without a base hash may bootstrap only when its current
   HA configuration is a semantically empty shell. Import labels this state

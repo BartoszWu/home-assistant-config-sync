@@ -109,28 +109,41 @@ def safe_text(value):
     return value
 
 
-def unsafe_reason(value, path='$'):
-    """Reject unsafe objects without echoing their data or secret-bearing keys."""
+def unsafe_findings(value, path='$'):
+    """Return scan hits without echoing values or secret-bearing keys."""
+    findings = []
     if isinstance(value, dict):
         for key, child in value.items():
+            child_path = _json_path(path, key)
             if not isinstance(key, str) or text_reason(key):
-                return 'unsafe field name'
+                findings.append({'reason': 'unsafe field name', 'path': path, 'field': None})
+                continue
             if normalized_key(key) in SENSITIVE_KEYS and child not in (None, '', False):
-                return 'sensitive field'
-            reason = unsafe_reason(child)
-            if reason:
-                return reason
+                findings.append({'reason': 'sensitive field', 'path': child_path, 'field': key})
+            findings.extend(unsafe_findings(child, child_path))
     elif isinstance(value, list):
-        for child in value:
-            reason = unsafe_reason(child)
-            if reason:
-                return reason
+        for index, child in enumerate(value):
+            findings.extend(unsafe_findings(child, f'{path}[{index}]'))
     elif isinstance(value, str):
         if safe_entity_id(value):
-            return None
-        return text_reason(value)
+            return findings
+        reason = text_reason(value)
+        if reason:
+            findings.append({'reason': reason, 'path': path, 'field': None})
     elif isinstance(value, float) and not math.isfinite(value):
-        return 'non-finite number'
+        findings.append({'reason': 'non-finite number', 'path': path, 'field': None})
     elif value is not None and not isinstance(value, (int, float, bool)):
-        return 'unsupported value type'
-    return None
+        findings.append({'reason': 'unsupported value type', 'path': path, 'field': None})
+    return findings
+
+
+def _json_path(path, key):
+    if isinstance(key, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key):
+        return f'{path}.{key}'
+    return f'{path}[<field>]'
+
+
+def unsafe_reason(value, path='$'):
+    """Reject unsafe objects without echoing their data or secret-bearing keys."""
+    findings = unsafe_findings(value, path)
+    return findings[0]['reason'] if findings else None
