@@ -24,9 +24,9 @@ timestamps describe one point-in-time export rather than history.
 | App | Runtime | GitHub access | Home Assistant access |
 | --- | --- | --- | --- |
 | **HA Config Sync — Export** | One-shot, no Web UI | Write deploy key for `home-assistant-config` | Reads selected data through the Supervisor-backed HA API and writes sanitized output to its own app data directory |
-| **HA Config Sync — Import** | Long-running Ingress Web UI | Separate read-only deploy key for `home-assistant-config` | Reads dashboards through the HA API; writes a dashboard only after it is explicitly selected and submitted in the UI, followed by conflict checking and read-back verification |
+| **HA Config Sync — Import** | Long-running Ingress Web UI | Separate read-only deploy key for `home-assistant-config` | Reads dashboards through the HA API and allowlisted managed files from `/homeassistant`; writes only after explicit UI approval, conflict checking and read-back verification |
 
-The split keeps the GitHub write credential out of the web-facing Import App. Neither App receives Docker access, host networking, full access, or direct access to `/config/.storage`.
+The split keeps the GitHub write credential out of the web-facing Import App. Neither App receives Docker access, host networking, or full access. Import 0.5+ mounts writable `homeassistant_config` at `/homeassistant` for Managed Files only, constrained by `import/managed_files.yaml`, path guards, and `import/apparmor.txt`.
 
 After at least one dashboard is successfully applied and verified, Import fires the Home Assistant event `ha_config_sync_import_applied`. The existing `Sync HA config to GitHub` automation listens for that event and starts Export. Import does not know the installed Export App ID and never receives its GitHub write key. A failed or blocked Apply does not request an Export.
 

@@ -1,0 +1,114 @@
+#include <tunables/global>
+
+# Custom AppArmor profile for HA Config Sync — Import.
+# Mount: homeassistant_config → /homeassistant (RW). Application allowlist is
+# still authoritative; this profile is defense-in-depth on the filesystem.
+#
+# Profile name must match config.yaml slug. Supervisor loads import/apparmor.txt.
+#
+# Deny mode letters (apparmor.d(5)):
+#   r read, w write, m executable mmap, l hard link, k lock, x execute (bare x
+#   only valid with deny). Append `a` conflicts with `w`, so sensitive paths get
+#   a second deny rule for `a`.
+profile ha_config_sync_import flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/python>
+
+  signal,
+  network,
+  file,
+
+  # S6 / Bashio / runtime
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /usr/local/bin/** ix,
+  /sbin/** ix,
+  /usr/sbin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /dev/tty rw,
+  /usr/lib/bashio/** ix,
+  /tmp/** rwk,
+  /data/** rwk,
+
+  # App code and Python deps
+  /app.py r,
+  /dashboard_logic.py r,
+  /visual_preview.py r,
+  /managed_files.py r,
+  /managed_files.yaml r,
+  /security.py r,
+  /run.sh rix,
+  /static/** r,
+  /usr/lib/python*/** mr,
+  /usr/local/lib/python*/** mr,
+  /usr/lib/libpython* mr,
+
+  # Read-only GitHub deploy key material (addon_config → /review)
+  /review/** r,
+  /review/ssh/** r,
+
+  # Git / SSH clone into /tmp
+  /usr/bin/git ix,
+  /usr/bin/ssh ix,
+  /usr/bin/ssh-keyscan ix,
+  /etc/ssl/certs/** r,
+  /etc/passwd r,
+  /etc/group r,
+  /etc/nsswitch.conf r,
+  /etc/resolv.conf r,
+  /etc/hosts r,
+
+  # HA config mount: allow only managed trees (+ preview staging under www).
+  /homeassistant/ r,
+  /homeassistant/packages/ rw,
+  /homeassistant/packages/** rw,
+  /homeassistant/www/ rw,
+  /homeassistant/www/** rw,
+  /homeassistant/custom_templates/ rw,
+  /homeassistant/custom_templates/** rw,
+
+  # Hard denies inside the HA config mount (even if a future bug expands paths).
+  # Directory path (`…/`) and descendants (`…/**`) are separate AppArmor globs.
+  deny /homeassistant/.storage/ rwmlkx,
+  deny /homeassistant/.storage/ a,
+  deny /homeassistant/.storage/** rwmlkx,
+  deny /homeassistant/.storage/** a,
+
+  deny /homeassistant/secrets.yaml rwmlkx,
+  deny /homeassistant/secrets.yaml a,
+  deny /homeassistant/configuration.yaml rwmlkx,
+  deny /homeassistant/configuration.yaml a,
+
+  deny /homeassistant/custom_components/ rwmlkx,
+  deny /homeassistant/custom_components/ a,
+  deny /homeassistant/custom_components/** rwmlkx,
+  deny /homeassistant/custom_components/** a,
+
+  deny /homeassistant/.cloud/ rwmlkx,
+  deny /homeassistant/.cloud/ a,
+  deny /homeassistant/.cloud/** rwmlkx,
+  deny /homeassistant/.cloud/** a,
+
+  deny /homeassistant/backups/ rwmlkx,
+  deny /homeassistant/backups/ a,
+  deny /homeassistant/backups/** rwmlkx,
+  deny /homeassistant/backups/** a,
+
+  deny /homeassistant/**/*.db rwmlkx,
+  deny /homeassistant/**/*.db a,
+  deny /homeassistant/**/*.db-shm rwmlkx,
+  deny /homeassistant/**/*.db-shm a,
+  deny /homeassistant/**/*.db-wal rwmlkx,
+  deny /homeassistant/**/*.db-wal a,
+  deny /homeassistant/**/*.sqlite rwmlkx,
+  deny /homeassistant/**/*.sqlite a,
+  deny /homeassistant/**/*.sqlite3 rwmlkx,
+  deny /homeassistant/**/*.sqlite3 a,
+}

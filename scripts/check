@@ -65,8 +65,20 @@ expected.each do |directory, (name, slug)|
   abort("#{relative} map must be a list") unless mappings.is_a?(Array)
   mappings.each do |mapping|
     next unless mapping.is_a?(Hash)
-    if %w[homeassistant_config all_addon_configs].include?(mapping["type"])
+    type = mapping["type"]
+    if type == "all_addon_configs"
       abort("#{relative} grants a forbidden broad mapping")
+    end
+    if type == "homeassistant_config"
+      unless directory == "import"
+        abort("#{relative} must not map homeassistant_config")
+      end
+      if mapping["read_only"] != false
+        abort("#{relative} homeassistant_config must be writable for Managed Files")
+      end
+      unless mapping["path"] == "/homeassistant"
+        abort("#{relative} homeassistant_config path must be /homeassistant")
+      end
     end
   end
 end
@@ -80,6 +92,52 @@ import_config = configs.fetch("import")
 unless import_config["ingress"] == true && import_config["homeassistant_api"] == true
   abort("Import requires Ingress and the Home Assistant API")
 end
+
+import_maps = Array(import_config["map"])
+ha_map = import_maps.find { |mapping| mapping.is_a?(Hash) && mapping["type"] == "homeassistant_config" }
+abort("Import must map writable homeassistant_config at /homeassistant for Managed Files") unless ha_map
+%w[apparmor.txt managed_files.yaml managed_files.py].each do |name|
+  abort("Import is missing #{name}") unless File.file?(File.join(root, "import", name))
+end
+apparmor = File.read(File.join(root, "import", "apparmor.txt"), encoding: "UTF-8")
+# Full deny mode set against broad `file,` (apparmor.d(5)): r/w/m/l/k/x plus
+# a separate append deny (`a` conflicts with `w` in one ACCESS list).
+full_deny = "rwmlkx"
+sensitive_dir_denies = {
+  ".storage" => true,
+  "custom_components" => true,
+  ".cloud" => true,
+  "backups" => true,
+}
+sensitive_dir_denies.each_key do |needle|
+  dir_rule = "deny /homeassistant/#{needle}/ #{full_deny},"
+  tree_rule = "deny /homeassistant/#{needle}/** #{full_deny},"
+  dir_append = "deny /homeassistant/#{needle}/ a,"
+  tree_append = "deny /homeassistant/#{needle}/** a,"
+  unless apparmor.include?(dir_rule)
+    abort("import/apparmor.txt must deny directory listing #{needle}/ with #{full_deny}")
+  end
+  unless apparmor.include?(tree_rule)
+    abort("import/apparmor.txt must deny descendants #{needle}/** with #{full_deny}")
+  end
+  unless apparmor.include?(dir_append) && apparmor.include?(tree_append)
+    abort("import/apparmor.txt must deny append on #{needle}/ and #{needle}/**")
+  end
+end
+%w[secrets.yaml configuration.yaml].each do |name|
+  file_rule = "deny /homeassistant/#{name} #{full_deny},"
+  append_rule = "deny /homeassistant/#{name} a,"
+  abort("import/apparmor.txt must deny #{name} with #{full_deny}") unless apparmor.include?(file_rule)
+  abort("import/apparmor.txt must deny append on #{name}") unless apparmor.include?(append_rule)
+end
+%w[*.db *.db-shm *.db-wal *.sqlite *.sqlite3].each do |pattern|
+  file_rule = "deny /homeassistant/**/#{pattern} #{full_deny},"
+  append_rule = "deny /homeassistant/**/#{pattern} a,"
+  abort("import/apparmor.txt must deny DB pattern #{pattern} with #{full_deny}") unless apparmor.include?(file_rule)
+  abort("import/apparmor.txt must deny append on DB pattern #{pattern}") unless apparmor.include?(append_rule)
+end
+policy = File.read(File.join(root, "import", "managed_files.yaml"), encoding: "UTF-8")
+abort("managed_files.yaml must not be empty") if policy.strip.empty?
 RUBY
 
 python3 - "$root" <<'PY'
