@@ -23,7 +23,7 @@ timestamps describe one point-in-time export rather than history.
 
 | App | Runtime | GitHub access | Home Assistant access |
 | --- | --- | --- | --- |
-| **HA Config Sync — Export** | One-shot, no Web UI | Write deploy key for `home-assistant-config` | Reads selected data through the Supervisor-backed HA API and writes sanitized output to its own app data directory |
+| **HA Config Sync — Export** | One-shot, no Web UI | Write deploy key for `home-assistant-config` | Reads selected data through the Supervisor-backed HA API, reads LIVE dashboard provenance from `/homeassistant/.config-sync/live-dashboards.json`, and writes sanitized output to its own app data directory |
 | **HA Config Sync — Import** | Long-running Ingress Web UI | Separate read-only deploy key for `home-assistant-config` | Reads dashboards through the HA API and allowlisted managed files from `/homeassistant`; writes only after explicit UI approval, conflict checking and read-back verification |
 
 The split keeps the GitHub write credential out of the web-facing Import App. Neither App receives Docker access, host networking, or full access. Import 0.5+ mounts writable `homeassistant_config` at `/homeassistant` for Managed Files only, constrained by `import/managed_files.yaml`, path guards, and `import/apparmor.txt`.
@@ -37,13 +37,28 @@ edit dashboard JSON → commit and push → Import → review → Apply
 → automatic Export → GitHub reflects the verified Home Assistant state
 ```
 
-The Export request happens immediately after a successful Apply. The same Home Assistant automation may still run Export on its normal schedule and after Home Assistant starts.
+The Export request happens immediately after a successful Apply. The same Home Assistant automation may still run Export on its normal schedule and after Home Assistant starts. Export never copies a feature-deployed LIVE dashboard onto `main`; inventory and other complete sections still publish.
 
 ## Import source revision (0.6)
 
 Import defaults to `main`. The Ingress **Source** control can pin a remote branch or an explicit 40-character commit SHA for the current review only. That choice is not saved as a new default.
 
 Preview, dashboard JSON, managed files and frontend staging all come from the same resolved commit. Apply is refused if a branch tip moves after the review (`SOURCE UPDATED — REFRESH REVIEW`). Import never merges branches or pushes to Git.
+
+## Canonical vs feature deployments (Import 0.7 / Export 0.8)
+
+Feature-branch Apply is a temporary LIVE test. Import records per-dashboard provenance after a verified Apply:
+
+- Apply from `main` → `CANONICAL MAIN`
+- Apply from a feature branch or explicit SHA → `NON-CANONICAL`
+
+Shared provenance lives at `/homeassistant/.config-sync/live-dashboards.json` (not under `www` / `/local`). Import also keeps `/data/dashboard-provenance.json`. Export may cache a copy in `/data`, but that cache can only restrict dashboard writes — a stale cached `CANONICAL MAIN` record never authorizes a write to `main`.
+
+Git cannot mark a feature branch canonical. While a dashboard is non-canonical, Export skips that dashboard's `main` sync and does not move `state/dashboard-bases.json` for it. Other canonical dashboards still sync. After the guard has been initialized, missing or corrupt shared provenance fail-closes all dashboard desired-state sync. Installations that have never written provenance remain legacy and keep the previous canonical-main Export behaviour.
+
+Non-canonical Apply is not SUCCESS until provenance persists and is read back. If persist fails, Import rolls LIVE back; if rollback fails, it arms the fail-closed guard.
+
+After the feature is merged to `main` outside Import, open Import on `main` and Refresh. If LIVE hash equals Git `main`, Import marks that dashboard `CANONICAL MAIN` without rewriting the identical dashboard. Manual HA edits during a feature deployment stay conflicts in Import; Export will not publish them to `main`.
 
 ## Managed files and frontend modules
 

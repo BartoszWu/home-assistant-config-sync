@@ -2,6 +2,7 @@ import importlib.util
 import copy
 import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -172,6 +173,12 @@ class PreviewHttpTests(unittest.TestCase):
         self.patches = [patch.object(app, "refresh_repo", return_value=fake_revision()),
                         patch.object(app, "collect_changes", return_value=[self.change]),
                         patch.object(app, "collect_managed_changes", return_value=([], {}))]
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.patches.extend([
+            patch.object(app, "IMPORT_STATE_PATH", Path(self.tmp.name) / "prov-local.json"),
+            patch.object(app, "SHARED_STATE_PATH", Path(self.tmp.name) / ".config-sync/live-dashboards.json"),
+        ])
         for mock in self.patches:
             mock.start()
             self.addCleanup(mock.stop)

@@ -30,9 +30,11 @@ COPY validate_export.py /validate_export.py
 COPY runtime_inventory.py /runtime_inventory.py
 COPY dashboard_exporter.py /dashboard_exporter.py
 COPY dashboard_manifest.py /dashboard_manifest.py
+COPY deployment_provenance.py /deployment_provenance.py
 COPY managed_config_exporter.py /managed_config_exporter.py
 COPY sync_dashboards.py /sync_dashboards.py
 COPY push_to_git.sh /push_to_git.sh
+COPY apparmor.txt /apparmor.txt
 
 RUN chmod 0755 /run.sh /push_to_git.sh
 

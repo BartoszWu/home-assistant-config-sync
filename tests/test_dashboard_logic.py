@@ -9,7 +9,9 @@ sys.path.insert(0, str(ROOT / "import"))
 from dashboard_logic import (  # noqa: E402
     BOOTSTRAP_STATUS,
     MISSING_BASE_STATUS,
+    NONCANONICAL_STATUS,
     classify,
+    classify_with_provenance,
     digest,
     is_empty_dashboard,
     matches_preview,
@@ -146,6 +148,27 @@ class DashboardLogicTests(unittest.TestCase):
         )
         self.assertEqual(status, "READY TO APPLY")
         self.assertTrue(selectable)
+
+    def test_feature_live_on_main_is_not_treated_as_ha_export_candidate(self):
+        from types import SimpleNamespace
+        provenance = SimpleNamespace(
+            canonical=False,
+            content_hash=digest(DESIRED_DASHBOARD),
+            source_ref="feature/redesign",
+            short_sha=lambda: "aaaaaaa",
+        )
+        status, css, selectable, reason, adopt = classify_with_provenance(
+            EMPTY_DASHBOARD,
+            DESIRED_DASHBOARD,
+            digest(EMPTY_DASHBOARD),
+            reviewing_canonical=True,
+            provenance=provenance,
+        )
+        self.assertEqual(status, NONCANONICAL_STATUS)
+        self.assertEqual(css, "changed")
+        self.assertFalse(selectable)
+        self.assertFalse(adopt)
+        self.assertIn("Canonical main sync is disabled", reason)
 
     def test_preview_hash_detects_any_ha_change_even_if_still_empty(self):
         preview = digest(EMPTY_DASHBOARD)
