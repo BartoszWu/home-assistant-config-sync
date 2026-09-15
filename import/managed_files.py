@@ -26,9 +26,15 @@ from review_warnings import format_scan_warnings
 
 POLICY_PATH = Path(__file__).with_name("managed_files.yaml")
 BASES_PATH = Path("/data/managed-file-bases.json")
+LAST_APPLY_PATH = Path("/data/last-apply.json")
 BACKUP_ROOT = Path("/data/managed-file-backups")
 JOURNAL_PATH = Path("/data/managed-file-journal.json")
 PREVIEW_DIRNAME = ".config-sync-preview"
+STAGING_SHA_LEN = 12
+FRONTEND_PREFIX_EXTENSIONS = frozenset({".js", ".mjs"})
+RELATIVE_IMPORT_RE = re.compile(
+    r"""(?<![A-Za-z0-9_])(?:import\s+(?:[^'"\n]+?\s+from\s+)?|export\s+[^'"\n]*?\s+from\s+)['"](\.[^'"]+)['"]"""
+)
 
 # First Apply when BASE is missing and LIVE already differs from Git.
 # Requires explicit checkbox selection; Initialize bases never adopts this drift.
@@ -61,12 +67,33 @@ FORBIDDEN_SUFFIXES = (".db", ".db-shm", ".db-wal", ".sqlite", ".sqlite3")
 RELATIVE_PATH_RE = re.compile(
     r"^(?:packages|www|custom_templates)/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+$"
 )
+PREFIX_RE = re.compile(
+    r"^(?:packages|www|custom_templates)/(?:[A-Za-z0-9._-]+/)+$"
+)
 
 
 @dataclass(frozen=True)
 class ManagedEntry:
     path: str
     profile: str
+
+
+@dataclass(frozen=True)
+class PrefixRule:
+    prefix: str
+    extensions: tuple[str, ...]
+    profile: str
+
+
+@dataclass(frozen=True)
+class ManagedPolicy:
+    ha_root: Path
+    exact: tuple[ManagedEntry, ...]
+    prefixes: tuple[PrefixRule, ...]
+
+    @property
+    def entries(self) -> list[ManagedEntry]:
+        return list(self.exact)
 
 
 @dataclass
@@ -80,7 +107,7 @@ def file_digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def load_policy(path: Path | None = None) -> tuple[Path, list[ManagedEntry]]:
+def load_policy(path: Path | None = None) -> ManagedPolicy:
     policy_file = path or POLICY_PATH
     raw = yaml.safe_load(policy_file.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -92,22 +119,69 @@ def load_policy(path: Path | None = None) -> tuple[Path, list[ManagedEntry]]:
     if not isinstance(entries_raw, list) or not entries_raw:
         raise RuntimeError("managed_files must be a non-empty list.")
     entries: list[ManagedEntry] = []
+    prefixes: list[PrefixRule] = []
     seen: set[str] = set()
+    seen_prefixes: set[str] = set()
     for item in entries_raw:
         if not isinstance(item, dict):
             raise RuntimeError("Each managed_files entry must be a mapping.")
-        relative = item.get("path")
         profile = item.get("profile")
-        if not isinstance(relative, str) or not isinstance(profile, str):
-            raise RuntimeError("managed_files entries require string path and profile.")
-        if profile not in PROFILES:
+        if not isinstance(profile, str) or profile not in PROFILES:
             raise RuntimeError(f"Unknown managed file profile: {profile}")
+        has_path = "path" in item
+        has_prefix = "prefix" in item
+        if has_path == has_prefix:
+            raise RuntimeError("Each managed_files entry must have either path or prefix.")
+        if has_prefix:
+            prefixes.append(_parse_prefix_rule(item, profile, seen_prefixes))
+            continue
+        relative = item.get("path")
+        if not isinstance(relative, str):
+            raise RuntimeError("managed_files path entries require a string path.")
+        if item.get("extensions") is not None:
+            raise RuntimeError("extensions are only valid on prefix entries.")
         validate_policy_path(relative)
         if relative in seen:
             raise RuntimeError(f"Duplicate managed file path: {relative}")
         seen.add(relative)
         entries.append(ManagedEntry(path=relative, profile=profile))
-    return Path(root), entries
+    return ManagedPolicy(ha_root=Path(root), exact=tuple(entries), prefixes=tuple(prefixes))
+
+
+def _parse_prefix_rule(item: dict, profile: str, seen_prefixes: set[str]) -> PrefixRule:
+    prefix = item.get("prefix")
+    extensions_raw = item.get("extensions")
+    if not isinstance(prefix, str) or not prefix:
+        raise RuntimeError("managed_files prefix entries require a string prefix.")
+    if profile != "frontend_module":
+        raise RuntimeError("Prefix discovery is only supported for frontend_module.")
+    if not prefix.endswith("/"):
+        raise RuntimeError("managed_files prefix must end with '/'.")
+    if prefix.startswith("/") or prefix.startswith("~") or "\\" in prefix:
+        raise RuntimeError("Absolute or backslash prefixes are forbidden.")
+    if any(part in {"", ".", ".."} for part in prefix.split("/")[:-1]):
+        raise RuntimeError("Path traversal is forbidden in prefix.")
+    if not PREFIX_RE.fullmatch(prefix):
+        raise RuntimeError(f"Prefix outside managed roots or invalid: {prefix}")
+    if not prefix.startswith("www/") or prefix.startswith(f"www/{PREVIEW_DIRNAME}/"):
+        raise RuntimeError("Frontend prefix must live under www/ and outside preview staging.")
+    if any(part.lower() in FORBIDDEN_PARTS for part in PurePosixPath(prefix).parts):
+        raise RuntimeError(f"Forbidden path segment in prefix {prefix}")
+    if prefix in seen_prefixes:
+        raise RuntimeError(f"Duplicate managed file prefix: {prefix}")
+    if not isinstance(extensions_raw, list) or not extensions_raw:
+        raise RuntimeError("Prefix entries require a non-empty extensions list.")
+    extensions: list[str] = []
+    for ext in extensions_raw:
+        if not isinstance(ext, str) or not ext.startswith(".") or "/" in ext or "\\" in ext:
+            raise RuntimeError(f"Invalid managed file extension: {ext}")
+        lowered = ext.lower()
+        if lowered not in FRONTEND_PREFIX_EXTENSIONS:
+            raise RuntimeError(f"Unsupported prefix extension: {ext}")
+        if lowered not in extensions:
+            extensions.append(lowered)
+    seen_prefixes.add(prefix)
+    return PrefixRule(prefix=prefix, extensions=tuple(extensions), profile=profile)
 
 
 def validate_policy_path(relative: str) -> None:
@@ -135,6 +209,88 @@ def validate_policy_path(relative: str) -> None:
         raise ValueError(f"Forbidden database-like suffix: {name}")
     if path.parts[0] == "www" and PREVIEW_DIRNAME in path.parts:
         raise ValueError("Preview staging paths cannot be managed targets.")
+    if any(part.startswith(".") for part in path.parts):
+        raise ValueError("Hidden path segments are forbidden.")
+
+
+def validate_prefix_member(relative: str, rule: PrefixRule) -> None:
+    validate_policy_path(relative)
+    if not relative.startswith(rule.prefix):
+        raise ValueError(f"Path is outside prefix {rule.prefix}")
+    suffix = Path(relative).suffix.lower()
+    if suffix not in rule.extensions:
+        raise ValueError(f"Extension {suffix or '(none)'} is not allowed under {rule.prefix}")
+
+
+def discover_managed_entries(workdir: Path, policy: ManagedPolicy) -> list[ManagedEntry]:
+    """Exact allowlist plus Git-tree discovery under prefix rules. Delete is not a candidate."""
+    found: list[ManagedEntry] = list(policy.exact)
+    seen = {entry.path for entry in found}
+    for rule in policy.prefixes:
+        prefix_dir = workdir.joinpath(*PurePosixPath(rule.prefix.rstrip("/")).parts)
+        if not prefix_dir.exists():
+            continue
+        if prefix_dir.is_symlink() or not prefix_dir.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(prefix_dir, followlinks=False):
+            dirnames[:] = [
+                name for name in dirnames
+                if name != PREVIEW_DIRNAME
+                and name not in FORBIDDEN_PARTS
+                and not name.startswith(".")
+            ]
+            current = Path(dirpath)
+            if current.is_symlink():
+                continue
+            for filename in filenames:
+                candidate = current / filename
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    rel = candidate.relative_to(workdir).as_posix()
+                    validate_prefix_member(rel, rule)
+                except ValueError:
+                    continue
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                found.append(ManagedEntry(path=rel, profile=rule.profile))
+    found.sort(key=lambda entry: entry.path)
+    return found
+
+
+def relative_import_hints(relative: str, text: str, known_paths: set[str]) -> list[str]:
+    """Best-effort warning only. Does not parse JS or block Apply."""
+    if not relative.startswith("www/"):
+        return []
+    hints = []
+    parent = PurePosixPath(relative).parent
+    seen: set[str] = set()
+    for match in RELATIVE_IMPORT_RE.finditer(text):
+        spec = match.group(1)
+        if spec in seen:
+            continue
+        seen.add(spec)
+        try:
+            resolved = (parent / spec).as_posix()
+            if ".." in PurePosixPath(os.path.normpath(resolved)).parts:
+                hints.append(
+                    f"Relative import {spec} walks above the module directory; staging keeps 1:1 paths."
+                )
+                continue
+            normalized = os.path.normpath(resolved).replace("\\", "/")
+            if normalized in known_paths:
+                hints.append(
+                    f"Relative import {spec} resolves to {normalized}. "
+                    "Select that file too if the preview should load it."
+                )
+            else:
+                hints.append(
+                    f"Relative import {spec} was not found among discovered managed files."
+                )
+        except (ValueError, OSError):
+            hints.append(f"Relative import {spec} could not be resolved.")
+    return hints
 
 
 def resolve_live_path(ha_root: Path, relative: str) -> Path:
@@ -222,7 +378,7 @@ def classify_file(github_hash: str, live_hash: str | None, base: str | None, uns
             "File missing in HA while Git also moved from the base.",
         )
     if github_hash == live_hash:
-        return "SAME", "same", False, "GitHub HEAD matches HA current."
+        return "SAME", "same", False, "Git source matches HA current."
     github_changed = github_hash != base
     ha_changed = live_hash != base
     if github_changed and not ha_changed:
@@ -280,11 +436,61 @@ def base_hash_for(bases: dict, relative: str) -> str | None:
     return None
 
 
-def set_base_hash(bases: dict, relative: str, sha256: str) -> None:
-    bases.setdefault("files", {})[relative] = {
+def set_base_hash(
+    bases: dict,
+    relative: str,
+    sha256: str,
+    *,
+    source_ref: str | None = None,
+    commit_sha: str | None = None,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    entry = {
         "sha256": sha256,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": now,
     }
+    if source_ref or commit_sha:
+        entry["last_applied"] = {
+            "source_ref": source_ref,
+            "commit_sha": commit_sha,
+            "sha256": sha256,
+            "applied_at": now,
+        }
+    bases.setdefault("files", {})[relative] = entry
+
+
+def load_last_apply(path: Path | None = None) -> dict | None:
+    target = path or LAST_APPLY_PATH
+    if not target.exists():
+        return None
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def record_last_apply(
+    *,
+    source_ref: str,
+    commit_sha: str,
+    dashboards: list[str] | None = None,
+    managed_files: list[str] | None = None,
+    path: Path | None = None,
+) -> None:
+    target = path or LAST_APPLY_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "source_ref": source_ref,
+        "commit_sha": commit_sha,
+        "applied_at": datetime.now(timezone.utc).isoformat(),
+        "dashboards": list(dashboards or []),
+        "managed_files": list(managed_files or []),
+    }
+    tmp = target.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
 
 
 def side_by_side_text(left: str, right: str):
@@ -311,34 +517,53 @@ def decode_text(data: bytes) -> str:
     return data.decode("utf-8")
 
 
-def staging_relative(content_hash: str, filename: str) -> str:
-    short = content_hash[:12]
-    return f"www/{PREVIEW_DIRNAME}/{short}/{filename}"
+def staging_commit_dir(commit_sha: str) -> str:
+    if not re.fullmatch(r"^[0-9a-f]{7,40}$", commit_sha):
+        raise ValueError("Staging requires a hexadecimal commit SHA.")
+    return commit_sha[:STAGING_SHA_LEN]
 
 
-def staging_public_url(content_hash: str, filename: str) -> str:
-    short = content_hash[:12]
-    return f"/local/{PREVIEW_DIRNAME}/{short}/{filename}?v={content_hash}"
-
-
-def ensure_frontend_staging(ha_root: Path, relative: str, data: bytes, content_hash: str) -> dict:
-    """Write Git desired bytes under www/.config-sync-preview/ — never the canonical file."""
+def www_relative(relative: str) -> str:
     validate_policy_path(relative)
     if not relative.startswith("www/"):
         raise ValueError("Staging is only for www frontend modules.")
-    filename = PurePosixPath(relative).name
-    staged_rel = staging_relative(content_hash, filename)
-    # Bypass policy path regex for preview dirname by resolving under www only.
+    return relative[len("www/"):]
+
+
+def staging_relative(commit_sha: str, relative: str) -> str:
+    return f"www/{PREVIEW_DIRNAME}/{staging_commit_dir(commit_sha)}/{www_relative(relative)}"
+
+
+def staging_public_url(commit_sha: str, relative: str, content_hash: str) -> str:
+    return (
+        f"/local/{PREVIEW_DIRNAME}/{staging_commit_dir(commit_sha)}/"
+        f"{www_relative(relative)}?v={content_hash}"
+    )
+
+
+def ensure_frontend_staging(
+    ha_root: Path,
+    relative: str,
+    data: bytes,
+    content_hash: str,
+    commit_sha: str,
+) -> dict:
+    """Write Git desired bytes under www/.config-sync-preview/<commit>/ — never canonical."""
+    under_www = www_relative(relative)
     root = ha_root.resolve(strict=False)
     preview_root = (root / "www" / PREVIEW_DIRNAME).resolve(strict=False)
     preview_root.relative_to(root / "www")
-    target_dir = preview_root / content_hash[:12]
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / filename
+    commit_root = (preview_root / staging_commit_dir(commit_sha)).resolve(strict=False)
+    commit_root.relative_to(preview_root)
+    target = (commit_root / under_www).resolve(strict=False)
+    try:
+        target.relative_to(commit_root)
+    except ValueError as error:
+        raise ValueError("Staging path escapes the commit preview directory.") from error
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and target.is_symlink():
         raise ValueError("Refusing symlink in preview staging.")
-    # Atomic replace inside staging only.
-    fd, tmp_name = tempfile.mkstemp(dir=target_dir, prefix=".stage-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".stage-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -352,9 +577,10 @@ def ensure_frontend_staging(ha_root: Path, relative: str, data: bytes, content_h
     if verified.sha256 != content_hash:
         raise RuntimeError("Staging read-back hash mismatch.")
     return {
-        "staged_relative": staged_rel,
-        "preview_url": staging_public_url(content_hash, filename),
+        "staged_relative": staging_relative(commit_sha, relative),
+        "preview_url": staging_public_url(commit_sha, relative, content_hash),
         "content_hash": content_hash,
+        "commit_sha": commit_sha,
     }
 
 
@@ -508,18 +734,20 @@ def collect_managed_changes(
     unsafe_reason,
     *,
     stage_frontend: bool = True,
+    commit_sha: str = "",
 ):
     bases = load_bases()
     changes = []
+    known_paths = {entry.path for entry in entries}
     for entry in entries:
         github_path = workdir / entry.path
-        if not github_path.is_file():
+        if github_path.is_symlink() or not github_path.is_file():
             changes.append(_managed_review(
                 entry,
                 status="ERROR",
                 css="error",
                 selectable=False,
-                reason="File missing from GitHub HEAD.",
+                reason="File missing from Git source.",
                 diff=empty_diff(),
                 warnings=[],
                 preview_ha_hash="",
@@ -528,6 +756,7 @@ def collect_managed_changes(
                 live_hash=None,
                 base=base_hash_for(bases, entry.path),
                 staging=None,
+                source_sha=commit_sha,
             ))
             continue
         github_data = github_path.read_bytes()
@@ -552,6 +781,7 @@ def collect_managed_changes(
                 live_hash=live.sha256,
                 base=base_hash_for(bases, entry.path),
                 staging=None,
+                source_sha=commit_sha,
             ))
             continue
         if entry.profile == "package":
@@ -567,6 +797,9 @@ def collect_managed_changes(
             scan_value = github_text
             parse_error = None
         warnings = format_scan_warnings(scan_value, github_text) if scan_value is not None else []
+        if entry.profile == "frontend_module":
+            for hint in relative_import_hints(entry.path, github_text, known_paths):
+                warnings.append({"reason": hint, "field": None, "path": entry.path, "line": None})
         status, css, selectable, reason = classify_file(
             github_hash,
             live.sha256,
@@ -581,7 +814,11 @@ def collect_managed_changes(
         ):
             # Stage desired Git bytes for optional manual/Visual verification without touching canonical.
             try:
-                staging = ensure_frontend_staging(ha_root, entry.path, github_data, github_hash)
+                if not commit_sha:
+                    raise ValueError("Frontend staging requires an immutable source commit SHA.")
+                staging = ensure_frontend_staging(
+                    ha_root, entry.path, github_data, github_hash, commit_sha
+                )
             except Exception as error:
                 staging = {"error": str(error)}
         changes.append(_managed_review(
@@ -601,6 +838,7 @@ def collect_managed_changes(
             live_exists=live.exists,
             staging=staging,
             absent_live_token="absent" if not live.exists else None,
+            source_sha=commit_sha,
         ))
     return changes, bases
 
@@ -615,6 +853,9 @@ def apply_managed_files(
     unsafe_reason,
     ha_ws_call,
     token: str,
+    *,
+    source_ref: str | None = None,
+    commit_sha: str | None = None,
 ):
     """Apply selected managed files with backup, atomic write, validate, activate, rollback."""
     entry_map = {entry.path: entry for entry in entries}
@@ -624,7 +865,12 @@ def apply_managed_files(
 
     with APPLY_LOCK:
         fresh_changes, bases = collect_managed_changes(
-            workdir, ha_root, entries, unsafe_reason, stage_frontend=False
+            workdir,
+            ha_root,
+            entries,
+            unsafe_reason,
+            stage_frontend=False,
+            commit_sha=commit_sha or "",
         )
         fresh = {change["relative"]: change for change in fresh_changes}
         journal = {
@@ -715,7 +961,13 @@ def apply_managed_files(
                         "Package activation failed: " + str(activation.get("message"))
                     )
                 for item in package_written:
-                    set_base_hash(bases, item["entry"].path, item["change"]["github_hash"])
+                    set_base_hash(
+                        bases,
+                        item["entry"].path,
+                        item["change"]["github_hash"],
+                        source_ref=source_ref,
+                        commit_sha=commit_sha,
+                    )
                     applied.append(item["entry"].path)
                     results.append({
                         "ok": True,
@@ -731,7 +983,13 @@ def apply_managed_files(
                     raise RuntimeError(
                         f"{item['entry'].path}: activation failed: {activation.get('message')}"
                     )
-                set_base_hash(bases, item["entry"].path, item["change"]["github_hash"])
+                set_base_hash(
+                    bases,
+                    item["entry"].path,
+                    item["change"]["github_hash"],
+                    source_ref=source_ref,
+                    commit_sha=commit_sha,
+                )
                 applied.append(item["entry"].path)
                 results.append({
                     "ok": True,

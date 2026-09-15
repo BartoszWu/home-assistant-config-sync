@@ -39,6 +39,19 @@ edit dashboard JSON → commit and push → Import → review → Apply
 
 The Export request happens immediately after a successful Apply. The same Home Assistant automation may still run Export on its normal schedule and after Home Assistant starts.
 
+## Import source revision (0.6)
+
+Import defaults to `main`. The Ingress **Source** control can pin a remote branch or an explicit 40-character commit SHA for the current review only. That choice is not saved as a new default.
+
+Preview, dashboard JSON, managed files and frontend staging all come from the same resolved commit. Apply is refused if a branch tip moves after the review (`SOURCE UPDATED — REFRESH REVIEW`). Import never merges branches or pushes to Git.
+
+## Managed files and frontend modules
+
+Exact allowlisted files stay in `import/managed_files.yaml`. In addition, Import discovers `.js` and `.mjs` files under `www/dashboard/` in the pinned commit. New dashboard modules belong in that prefix; `www/temperature-card.mjs` remains on its exact V1 path. Delete is not supported. Live files that are absent from the selected Git revision are left in place.
+
+Frontend preview staging writes
+`/homeassistant/www/.config-sync-preview/<commit>/…` while preserving directory structure so relative ES module imports resolve. Canonical `www/` paths change only on Apply.
+
 For a new dashboard, first create its empty UI-controlled shell in Home
 Assistant so the URL path and sidebar metadata exist. Import recognizes that
 semantically empty shell without requiring an exported base, labels it

@@ -7,12 +7,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
 import app
 from dashboard_logic import digest
 from diff_view import compare_json, file_anchor, hunk_rows
+from git_source import SourceRevision
 from visual_preview import prepare_preview
 
 before = {"views": [{"title": "Before", "cards": []}]}
 after = {"views": [{"title": "After", "cards": []}]}
 diff = compare_json(before, after)
-app.refresh_repo = lambda: "synthetic-fixture"
+app.refresh_repo = lambda *args, **kwargs: SourceRevision(
+    source_ref="main",
+    source_kind="branch",
+    commit_sha="b" * 40,
+    short_sha="bbbbbbb",
+    available_branches=("main",),
+    branch_tip_sha="b" * 40,
+)
 app.collect_changes = lambda: [{
     "name": "test-dashboard", "relative": "test-dashboard.json",
     "preview_desired_hash": digest(after),

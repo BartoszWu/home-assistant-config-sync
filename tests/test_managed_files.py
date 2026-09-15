@@ -11,6 +11,8 @@ import managed_files as mf  # noqa: E402
 from dashboard_logic import MISSING_BASE_STATUS  # noqa: E402
 
 MANAGED_BOOTSTRAP_STATUS = mf.MANAGED_BOOTSTRAP_STATUS
+COMMIT_SHA = "7ad83f2" + "a" * 33
+COMMIT_DIR = COMMIT_SHA[:12]
 
 
 def unsafe_none(_value):
@@ -119,13 +121,14 @@ class StagingAndApplyTests(unittest.TestCase):
         data = b"NEW-MODULE"
         digest = mf.file_digest(data)
         staging = mf.ensure_frontend_staging(
-            self.root, "www/temperature-card.mjs", data, digest
+            self.root, "www/temperature-card.mjs", data, digest, COMMIT_SHA
         )
         self.assertEqual(canonical.read_text(encoding="utf-8"), "OLD")
-        staged = self.root / "www" / mf.PREVIEW_DIRNAME / digest[:12] / "temperature-card.mjs"
+        staged = self.root / "www" / mf.PREVIEW_DIRNAME / COMMIT_DIR / "temperature-card.mjs"
         self.assertTrue(staged.is_file())
         self.assertEqual(staged.read_bytes(), data)
         self.assertIn("/local/.config-sync-preview/", staging["preview_url"])
+        self.assertIn(COMMIT_DIR, staging["preview_url"])
 
     def test_apply_updates_base_and_rejects_stale_preview(self):
         live = self.root / "packages" / "temperatura.yaml"
@@ -263,20 +266,24 @@ class StagingAndApplyTests(unittest.TestCase):
         # resolve_live_path only enforces shape/guards; Apply uses policy membership.
         path = mf.resolve_live_path(self.root, "packages/temperatura.yaml")
         self.assertEqual(path, (self.root / "packages" / "temperatura.yaml").resolve())
-        allowed = {entry.path for entry in mf.load_policy(ROOT / "import" / "managed_files.yaml")[1]}
+        allowed = {entry.path for entry in mf.load_policy(ROOT / "import" / "managed_files.yaml").exact}
         self.assertNotIn("packages/ogrzewanie.yaml", allowed)
         self.assertIn("packages/temperatura.yaml", allowed)
 
     def test_policy_loader_v1_entries(self):
-        root, entries = mf.load_policy(ROOT / "import" / "managed_files.yaml")
-        self.assertEqual(root, Path("/homeassistant"))
+        policy = mf.load_policy(ROOT / "import" / "managed_files.yaml")
+        self.assertEqual(policy.ha_root, Path("/homeassistant"))
         self.assertEqual(
-            [(e.path, e.profile) for e in entries],
+            [(e.path, e.profile) for e in policy.exact],
             [
                 ("packages/temperatura.yaml", "package"),
                 ("www/temperature-card.mjs", "frontend_module"),
             ],
         )
+        self.assertEqual(len(policy.prefixes), 1)
+        self.assertEqual(policy.prefixes[0].prefix, "www/dashboard/")
+        self.assertEqual(policy.prefixes[0].extensions, (".js", ".mjs"))
+        self.assertEqual(policy.prefixes[0].profile, "frontend_module")
 
     def test_initialize_missing_bases(self):
         content = "same\n"
@@ -320,7 +327,7 @@ class StagingAndApplyTests(unittest.TestCase):
 
         # Review staging must leave production untouched.
         staging = mf.ensure_frontend_staging(
-            self.root, "www/temperature-card.mjs", git.read_bytes(), git_hash
+            self.root, "www/temperature-card.mjs", git.read_bytes(), git_hash, COMMIT_SHA
         )
         self.assertEqual(canonical.read_text(encoding="utf-8"), "OLD-MODULE\n")
         self.assertIn(".config-sync-preview", staging["staged_relative"])
@@ -398,6 +405,235 @@ class CollectTests(unittest.TestCase):
             self.assertEqual(changes[0]["warnings"][0]["field"], "unique_id")
             self.assertEqual(changes[0]["warnings"][0]["line"], 3)
             self.assertNotIn("synthetic_unique", str(changes[0]["warnings"]))
+
+
+class PrefixDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.work = self.root / "git"
+        (self.work / "www" / "dashboard" / "shared").mkdir(parents=True)
+        (self.root / "www" / "dashboard" / "shared").mkdir(parents=True)
+        self.policy = mf.ManagedPolicy(
+            ha_root=self.root,
+            exact=(mf.ManagedEntry("www/temperature-card.mjs", "frontend_module"),),
+            prefixes=(
+                mf.PrefixRule("www/dashboard/", (".js", ".mjs"), "frontend_module"),
+            ),
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_discovers_nested_js_and_mjs_under_prefix(self):
+        (self.work / "www" / "temperature-card.mjs").write_text("legacy\n", encoding="utf-8")
+        (self.work / "www" / "dashboard" / "home-hero.mjs").write_text(
+            'import "./shared/utils.mjs";\n', encoding="utf-8"
+        )
+        (self.work / "www" / "dashboard" / "room-grid.js").write_text("export const grid = 1;\n", encoding="utf-8")
+        (self.work / "www" / "dashboard" / "shared" / "utils.mjs").write_text("export const x = 1;\n", encoding="utf-8")
+        (self.work / "www" / "dashboard" / "notes.yaml").write_text("nope: true\n", encoding="utf-8")
+        (self.work / "www" / "other.mjs").write_text("outside\n", encoding="utf-8")
+        discovered = mf.discover_managed_entries(self.work, self.policy)
+        paths = [entry.path for entry in discovered]
+        self.assertEqual(
+            paths,
+            [
+                "www/dashboard/home-hero.mjs",
+                "www/dashboard/room-grid.js",
+                "www/dashboard/shared/utils.mjs",
+                "www/temperature-card.mjs",
+            ],
+        )
+
+    def test_rejects_yaml_outside_prefix_and_traversal(self):
+        with self.assertRaises(ValueError):
+            mf.validate_prefix_member("www/dashboard/notes.yaml", self.policy.prefixes[0])
+        with self.assertRaises(ValueError):
+            mf.validate_prefix_member("www/other.mjs", self.policy.prefixes[0])
+        with self.assertRaises(ValueError):
+            mf.validate_policy_path("www/dashboard/../other.mjs")
+        with self.assertRaises(ValueError):
+            mf.validate_policy_path("../www/dashboard/home-hero.mjs")
+
+    def test_symlink_escape_is_rejected(self):
+        outside = Path(self.tmp.name + "_outside")
+        outside.mkdir()
+        secret = outside / "secret.mjs"
+        secret.write_text("nope", encoding="utf-8")
+        link = self.root / "www" / "dashboard" / "escaped.mjs"
+        link.symlink_to(secret)
+        with self.assertRaises(ValueError):
+            mf.resolve_live_path(self.root, "www/dashboard/escaped.mjs")
+
+    def test_live_only_file_is_not_a_delete_candidate(self):
+        (self.work / "www" / "dashboard" / "home-hero.mjs").write_text("git\n", encoding="utf-8")
+        leftover = self.root / "www" / "dashboard" / "orphan.mjs"
+        leftover.write_text("live-only\n", encoding="utf-8")
+        discovered = mf.discover_managed_entries(self.work, self.policy)
+        self.assertNotIn("www/dashboard/orphan.mjs", [entry.path for entry in discovered])
+        self.assertEqual(leftover.read_text(encoding="utf-8"), "live-only\n")
+
+
+class PrefixApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "www" / "dashboard" / "shared").mkdir(parents=True)
+        self.workdir = self.root / "git"
+        (self.workdir / "www" / "dashboard" / "shared").mkdir(parents=True)
+        self.bases = self.root / "bases.json"
+        self.backup = self.root / "backups"
+        self.journal = self.root / "journal.json"
+        self.last_apply = self.root / "last-apply.json"
+        self.patches = [
+            mock.patch.object(mf, "BASES_PATH", self.bases),
+            mock.patch.object(mf, "BACKUP_ROOT", self.backup),
+            mock.patch.object(mf, "JOURNAL_PATH", self.journal),
+            mock.patch.object(mf, "LAST_APPLY_PATH", self.last_apply),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self.patches:
+            patcher.stop()
+        self.tmp.cleanup()
+
+    def test_staging_preserves_nested_structure_per_commit(self):
+        data = b'import "./shared/utils.mjs";\n'
+        digest = mf.file_digest(data)
+        other = "8bd33aa" + "b" * 33
+        staging = mf.ensure_frontend_staging(
+            self.root, "www/dashboard/home-hero.mjs", data, digest, COMMIT_SHA
+        )
+        nested = (
+            self.root / "www" / mf.PREVIEW_DIRNAME / COMMIT_DIR
+            / "dashboard" / "home-hero.mjs"
+        )
+        self.assertTrue(nested.is_file())
+        self.assertNotEqual(
+            nested,
+            self.root / "www" / "dashboard" / "home-hero.mjs",
+        )
+        self.assertFalse((self.root / "www" / "dashboard" / "home-hero.mjs").exists())
+        self.assertIn(f"/local/.config-sync-preview/{COMMIT_DIR}/dashboard/home-hero.mjs", staging["preview_url"])
+        mf.ensure_frontend_staging(
+            self.root,
+            "www/dashboard/home-hero.mjs",
+            b"other-branch\n",
+            mf.file_digest(b"other-branch\n"),
+            other,
+        )
+        self.assertEqual(nested.read_bytes(), data)
+        self.assertEqual(
+            (self.root / "www" / mf.PREVIEW_DIRNAME / other[:12] / "dashboard" / "home-hero.mjs").read_bytes(),
+            b"other-branch\n",
+        )
+
+    def test_multi_file_apply_publishes_selected_modules_only(self):
+        live_hero = self.root / "www" / "dashboard" / "home-hero.mjs"
+        live_grid = self.root / "www" / "dashboard" / "room-grid.mjs"
+        live_utils = self.root / "www" / "dashboard" / "shared" / "utils.mjs"
+        live_hero.write_text("old-hero\n", encoding="utf-8")
+        live_grid.write_text("old-grid\n", encoding="utf-8")
+        live_utils.write_text("old-utils\n", encoding="utf-8")
+        (self.workdir / "www" / "dashboard" / "home-hero.mjs").write_text("new-hero\n", encoding="utf-8")
+        (self.workdir / "www" / "dashboard" / "room-grid.mjs").write_text("new-grid\n", encoding="utf-8")
+        (self.workdir / "www" / "dashboard" / "shared" / "utils.mjs").write_text("new-utils\n", encoding="utf-8")
+        hashes = {
+            "www/dashboard/home-hero.mjs": mf.file_digest(live_hero.read_bytes()),
+            "www/dashboard/room-grid.mjs": mf.file_digest(live_grid.read_bytes()),
+            "www/dashboard/shared/utils.mjs": mf.file_digest(live_utils.read_bytes()),
+        }
+        git_hashes = {
+            "www/dashboard/home-hero.mjs": mf.file_digest(b"new-hero\n"),
+            "www/dashboard/room-grid.mjs": mf.file_digest(b"new-grid\n"),
+            "www/dashboard/shared/utils.mjs": mf.file_digest(b"new-utils\n"),
+        }
+        bases = {"schema_version": 1, "files": {}}
+        for relative, digest in hashes.items():
+            mf.set_base_hash(bases, relative, digest)
+        mf.save_bases(bases)
+        entries = [
+            mf.ManagedEntry(path, "frontend_module") for path in hashes
+        ]
+        results, applied = mf.apply_managed_files(
+            ["www/dashboard/home-hero.mjs", "www/dashboard/shared/utils.mjs"],
+            hashes,
+            git_hashes,
+            self.workdir,
+            self.root,
+            entries,
+            unsafe_none,
+            lambda *a, **k: {},
+            "token",
+            source_ref="feature/dashboard-redesign",
+            commit_sha=COMMIT_SHA,
+        )
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(
+            applied,
+            ["www/dashboard/home-hero.mjs", "www/dashboard/shared/utils.mjs"],
+        )
+        self.assertEqual(live_hero.read_text(encoding="utf-8"), "new-hero\n")
+        self.assertEqual(live_utils.read_text(encoding="utf-8"), "new-utils\n")
+        self.assertEqual(live_grid.read_text(encoding="utf-8"), "old-grid\n")
+        stored = mf.load_bases()["files"]["www/dashboard/home-hero.mjs"]
+        self.assertEqual(stored["sha256"], git_hashes["www/dashboard/home-hero.mjs"])
+        self.assertEqual(stored["last_applied"]["source_ref"], "feature/dashboard-redesign")
+        self.assertEqual(stored["last_applied"]["commit_sha"], COMMIT_SHA)
+
+    def test_apply_does_not_delete_live_file_missing_from_git(self):
+        leftover = self.root / "www" / "dashboard" / "orphan.mjs"
+        leftover.write_text("keep-me\n", encoding="utf-8")
+        live = self.root / "www" / "dashboard" / "home-hero.mjs"
+        live.write_text("old\n", encoding="utf-8")
+        (self.workdir / "www" / "dashboard" / "home-hero.mjs").write_text("new\n", encoding="utf-8")
+        live_hash = mf.file_digest(b"old\n")
+        git_hash = mf.file_digest(b"new\n")
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "www/dashboard/home-hero.mjs", live_hash)
+        mf.save_bases(bases)
+        results, applied = mf.apply_managed_files(
+            ["www/dashboard/home-hero.mjs"],
+            {"www/dashboard/home-hero.mjs": live_hash},
+            {"www/dashboard/home-hero.mjs": git_hash},
+            self.workdir,
+            self.root,
+            [mf.ManagedEntry("www/dashboard/home-hero.mjs", "frontend_module")],
+            unsafe_none,
+            lambda *a, **k: {},
+            "token",
+            source_ref="main",
+            commit_sha=COMMIT_SHA,
+        )
+        self.assertTrue(applied)
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(leftover.read_text(encoding="utf-8"), "keep-me\n")
+
+    def test_relative_import_warning_does_not_block_apply(self):
+        (self.workdir / "www" / "dashboard" / "home-hero.mjs").write_text(
+            'import "./shared/utils.mjs";\nexport const hero = 1;\n',
+            encoding="utf-8",
+        )
+        (self.workdir / "www" / "dashboard" / "shared" / "utils.mjs").write_text(
+            "export const x = 1;\n", encoding="utf-8"
+        )
+        changes, _ = mf.collect_managed_changes(
+            self.workdir,
+            self.root,
+            [
+                mf.ManagedEntry("www/dashboard/home-hero.mjs", "frontend_module"),
+                mf.ManagedEntry("www/dashboard/shared/utils.mjs", "frontend_module"),
+            ],
+            unsafe_none,
+            stage_frontend=False,
+            commit_sha=COMMIT_SHA,
+        )
+        hero = next(item for item in changes if item["relative"].endswith("home-hero.mjs"))
+        self.assertTrue(hero["selectable"])
+        self.assertTrue(any("shared/utils.mjs" in (warning.get("reason") or "") for warning in hero["warnings"]))
 
 
 if __name__ == "__main__":

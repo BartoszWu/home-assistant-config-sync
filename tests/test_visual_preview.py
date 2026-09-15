@@ -10,10 +10,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
 
 from visual_preview import UNAVAILABLE, prepare_preview
 from diff_view import compare_json, file_anchor, hunk_rows
+from git_source import SourceRevision
 
 
 BEFORE = {"views": [{"title": "Before", "cards": []}]}
 AFTER = {"views": [{"title": "After", "cards": []}]}
+REVIEW_SHA = "a" * 40
+
+
+def fake_revision(**kwargs):
+    sha = kwargs.get("commit_sha", REVIEW_SHA)
+    return SourceRevision(
+        source_ref=kwargs.get("source_ref", "main"),
+        source_kind=kwargs.get("source_kind", "branch"),
+        commit_sha=sha,
+        short_sha=kwargs.get("short_sha", sha[:7]),
+        available_branches=kwargs.get("available_branches", ("main",)),
+        branch_tip_sha=kwargs.get("branch_tip_sha", sha),
+        stale=kwargs.get("stale", False),
+        reviewed_sha=kwargs.get("reviewed_sha"),
+    )
 
 
 class PreviewPreparationTests(unittest.TestCase):
@@ -153,7 +169,7 @@ class PreviewHttpTests(unittest.TestCase):
             "rows": hunk_rows(compare_json(BEFORE, AFTER)), "added": 1, "removed": 1,
             "visual": prepare_preview("test-dashboard.json", BEFORE, AFTER, lambda _: None),
         }
-        self.patches = [patch.object(app, "refresh_repo", return_value="test-commit"),
+        self.patches = [patch.object(app, "refresh_repo", return_value=fake_revision()),
                         patch.object(app, "collect_changes", return_value=[self.change]),
                         patch.object(app, "collect_managed_changes", return_value=([], {}))]
         for mock in self.patches:
@@ -170,7 +186,9 @@ class PreviewHttpTests(unittest.TestCase):
         self.assertIn('data-preview-tab="visual"', html)
         self.assertIn('YAML diff', html)
         self.assertIn('HA current', html)
-        self.assertIn('GitHub HEAD', html)
+        self.assertIn('Git aaaaaaa', html)
+        self.assertIn("Refresh source", html)
+        self.assertIn("Resolved commit:", html)
         # Progressive enhancement: diff is usable if JavaScript fails to load.
         self.assertIn('<div class="yaml-panel">', html)
         self.assertIn("Changed files", html)
@@ -210,6 +228,8 @@ class PreviewHttpTests(unittest.TestCase):
                 "selected": self.change["relative"],
                 "desired_hash": self.change["relative"] + ":" + self.change["preview_desired_hash"],
                 "preview_hash": self.change["relative"] + ":" + self.change["preview_ha_hash"],
+                "source": "main",
+                "reviewed_sha": REVIEW_SHA,
             })
         self.assertIn("Applied and verified.", response.get_data(as_text=True))
         save.assert_called_once_with("test-dashboard.json", AFTER)
@@ -235,6 +255,8 @@ class PreviewHttpTests(unittest.TestCase):
                 "selected": self.change["relative"],
                 "desired_hash": self.change["relative"] + ":" + self.change["preview_desired_hash"],
                 "preview_hash": self.change["relative"] + ":" + self.change["preview_ha_hash"],
+                "source": "main",
+                "reviewed_sha": REVIEW_SHA,
             })
         self.assertIn("Applied and verified.", response.get_data(as_text=True))
         save.assert_called_once_with("test-dashboard.json", desired)

@@ -55,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `config.yaml` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.5.2` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.6.0` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -93,10 +93,13 @@ Do not add any of the following unless the user explicitly approves a reviewed a
 - Custom `import/apparmor.txt` adds filesystem deny rules for those sensitive
   paths. AppArmor is defense-in-depth; the application allowlist remains primary.
 - Desired state for managed files is **Git → HA only**. Bases are stored in
-  Import `/data/managed-file-bases.json`. Do not add Export round-trip for these
-  files without a new reviewed decision.
-- Frontend modules may be staged under `www/.config-sync-preview/` for preview;
-  Apply alone may update the canonical `www/` path.
+  Import `/data/managed-file-bases.json`. Last successful Apply also records
+  `source_ref`, `commit_sha`, content hash and timestamp; this is metadata, not
+  a merge. Do not add Export round-trip for these files without a new reviewed
+  decision.
+- Frontend modules may be staged under `www/.config-sync-preview/<commit-sha>/`
+  preserving the path under `www/` so relative ES module imports work. Apply
+  alone may update the canonical `www/` path.
 - Never auto-restart Core; invalid config must roll back; packages use
   `POST /api/config/core/check_config` then `homeassistant.reload_all`.
 
@@ -182,8 +185,17 @@ The destination data repository and branch are currently fixed in code as `Barto
 Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 
 - GitHub access is read-only.
+- Import reviews one immutable Git commit. Default source is `main`; a feature
+  branch or 40-character commit SHA may be selected in the Ingress UI for the
+  current session only and is not saved as a new default. Apply is pinned to the
+  reviewed SHA. If a branch tip moves after preview, Import refuses with
+  `SOURCE UPDATED — REFRESH REVIEW` and does not apply the new tip silently.
+  Import never merges or pushes.
 - Only JSON files directly under `dashboards/` are considered for dashboards.
-- Managed files are limited to the exact paths in `import/managed_files.yaml`.
+- Managed files are limited to exact paths and prefix rules in
+  `import/managed_files.yaml`. Prefix rules may discover `.js`/`.mjs` files
+  under `www/dashboard/` in the pinned commit. The data repository cannot expand
+  prefixes. Delete is not supported.
 - Path traversal and nested dashboard paths are rejected.
 - Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs. Hits are review warnings with field path and source line; they do not hide the Apply checkbox. Apply still requires explicit selection, a fresh conflict check, and read-back verification. Warnings never echo matched values.
 - Status is derived from GitHub HEAD, current HA state, and the exported/base hash.

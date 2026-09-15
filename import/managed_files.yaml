@@ -1,7 +1,10 @@
 # Declarative Managed Files policy for HA Config Sync — Import.
 # Lives in the App code repository only. The data repository cannot expand this list.
 #
-# Adding a file later: append an entry with an existing profile. Do not change the engine.
+# Exact `path` entries remain the V1 allowlist.
+# `prefix` entries discover .js/.mjs under that directory in the pinned Git commit.
+# New dashboard frontend modules belong under www/dashboard/ (not the www/ root).
+# Existing www/temperature-card.mjs stays on the exact path; do not wildcard all of www/.
 schema_version: 1
 
 # Container mount of Supervisor type homeassistant_config (see import/config.yaml).
@@ -12,4 +15,10 @@ managed_files:
     profile: package
 
   - path: www/temperature-card.mjs
+    profile: frontend_module
+
+  - prefix: www/dashboard/
+    extensions:
+      - .js
+      - .mjs
     profile: frontend_module
