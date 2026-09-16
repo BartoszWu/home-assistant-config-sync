@@ -160,6 +160,10 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 [hidden] { display:none !important; }
 .apply-progress { display:none; align-items:center; gap:9px; margin-right:12px; padding:9px 12px; border-radius:8px; background:#e3f2fd; color:#174f78; font-weight:650; }
 .apply-progress.visible { display:flex; }
+.refresh-progress { position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center; background:rgba(15,18,22,.28); cursor:wait; }
+.refresh-progress.visible { display:flex; }
+.refresh-progress-card { display:flex; align-items:center; gap:12px; padding:16px 20px; border-radius:12px; background:var(--card-background); box-shadow:0 8px 28px #0004; font-weight:650; }
+.refresh-progress .spinner { width:22px; height:22px; border-width:3px; }
 .source-form { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:end; }
 .source-form label { display:flex; flex-direction:column; gap:4px; font-size:13px; font-weight:650; }
 .source-form select, .source-form input[type=text] { padding:8px 10px; border-radius:8px; border:1px solid #d9dde1; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:220px; background:var(--card-background); color:var(--text-color); }
@@ -190,13 +194,14 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   .diff-gap td { background:#252a2f; color:#aab0b6; }
   .diff-hunk td { background:#1c3d5a; color:#79c0ff; }
   .preview-viewport { background:#1a1e22; }
+  .refresh-progress { background:rgba(0,0,0,.48); }
 }
 </style>
 </head>
 <body><main>
 <header>
   <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
-  <form method="get">
+  <form id="refresh-github-form" method="get">
     {% if git_source and git_source.source_kind == 'commit' %}
     <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
     {% elif git_source %}
@@ -209,7 +214,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <section class="card" id="source">
   <h2 style="margin-top:0">Source</h2>
   <p class="small">Default is <code>main</code>. Choosing a feature branch does not merge, does not push, and does not change the saved default. Preview and Apply use one pinned commit SHA.</p>
-  <form method="get" class="source-form">
+  <form id="source-form" method="get" class="source-form">
     <label>Branch
       <select name="source" aria-label="Source branch">
         {% for name in (git_source.available_branches if git_source else ['main']) %}
@@ -220,7 +225,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     <label>Commit SHA (optional)
       <input type="text" name="source_sha" value="{{ git_source.source_ref if git_source and git_source.source_kind == 'commit' else '' }}" pattern="[0-9a-f]{40}" placeholder="40-character SHA" spellcheck="false" autocomplete="off" aria-label="Optional commit SHA">
     </label>
-    <button type="submit">Refresh source</button>
+    <button id="refresh-source-button" type="submit">Refresh source</button>
   </form>
   <p class="source-resolved" style="margin:12px 0 0">
     Source: <code>{{ git_source.source_ref if git_source else 'main' }}</code>
@@ -447,12 +452,59 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </form>
 {% endif %}
 </main>
+<div id="refresh-progress" class="refresh-progress" role="status" aria-live="polite">
+  <div class="refresh-progress-card">
+    <span class="spinner" aria-hidden="true"></span>
+    <span data-busy-label>Refreshing GitHub…</span>
+  </div>
+</div>
 <script>
+function pageIsBusy() {
+  return document.body.dataset.busy === 'true';
+}
+
+function markPageBusy(message) {
+  if (pageIsBusy()) return false;
+  document.body.dataset.busy = 'true';
+  document.body.setAttribute('aria-busy', 'true');
+  const progress = document.getElementById('refresh-progress');
+  if (progress) {
+    const label = progress.querySelector('[data-busy-label]');
+    if (label && message) label.textContent = message;
+    progress.classList.add('visible');
+  }
+  ['refresh-button', 'refresh-source-button', 'apply-button', 'cancel-button'].forEach(id => {
+    const button = document.getElementById(id);
+    if (button) button.disabled = true;
+  });
+  const refreshButton = document.getElementById('refresh-button');
+  const sourceButton = document.getElementById('refresh-source-button');
+  if (refreshButton) refreshButton.textContent = 'Refreshing…';
+  if (sourceButton) sourceButton.textContent = 'Refreshing…';
+  return true;
+}
+
+function submitAfterPaint(form) {
+  window.setTimeout(() => form.submit(), 50);
+}
+
+function bindBusySubmit(form, message) {
+  if (!form) return;
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    if (!markPageBusy(message)) return;
+    submitAfterPaint(form);
+  });
+}
+
+bindBusySubmit(document.getElementById('refresh-github-form'), 'Refreshing GitHub…');
+bindBusySubmit(document.getElementById('source-form'), 'Refreshing source…');
+
 const form = document.getElementById('apply-form');
 if (form) {
   form.addEventListener('submit', event => {
     event.preventDefault();
-    if (form.dataset.submitting === 'true') return;
+    if (form.dataset.submitting === 'true' || pageIsBusy()) return;
     const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked');
     if (!selected.length) {
       window.alert('Select at least one dashboard or managed file ready to apply.');
@@ -460,10 +512,12 @@ if (form) {
     }
     form.dataset.submitting = 'true';
     const applyButton = document.getElementById('apply-button');
-    const refreshButton = document.getElementById('refresh-button');
     applyButton.disabled = true;
     applyButton.textContent = 'Applying…';
-    if (refreshButton) refreshButton.disabled = true;
+    ['refresh-button', 'refresh-source-button', 'cancel-button'].forEach(id => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = true;
+    });
     document.getElementById('apply-progress').classList.add('visible');
     window.setTimeout(() => form.submit(), 50);
   });
@@ -471,9 +525,11 @@ if (form) {
 const sourceSelect = document.querySelector('#source select[name="source"]');
 if (sourceSelect) {
   sourceSelect.addEventListener('change', event => {
-    const sha = event.target.form.querySelector('input[name="source_sha"]');
+    const sourceForm = event.target.form;
+    const sha = sourceForm.querySelector('input[name="source_sha"]');
     if (sha) sha.value = '';
-    event.target.form.submit();
+    if (!markPageBusy('Refreshing source…')) return;
+    submitAfterPaint(sourceForm);
   });
 }
 </script>

@@ -195,6 +195,11 @@ class PreviewHttpTests(unittest.TestCase):
         self.assertIn('HA current', html)
         self.assertIn('Git aaaaaaa', html)
         self.assertIn("Refresh source", html)
+        self.assertIn('id="refresh-github-form"', html)
+        self.assertIn('id="refresh-source-button"', html)
+        self.assertIn('id="refresh-progress"', html)
+        self.assertIn("Refreshing GitHub", html)
+        self.assertIn("Refreshing source", html)
         self.assertIn("Resolved commit:", html)
         # Progressive enhancement: diff is usable if JavaScript fails to load.
         self.assertIn('<div class="yaml-panel">', html)
