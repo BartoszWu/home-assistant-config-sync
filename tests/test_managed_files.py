@@ -32,6 +32,10 @@ class PathGuardTests(unittest.TestCase):
             "custom_components/foo/manifest.json",
             "configuration.yaml",
             "packages/foo.db",
+            "custom_templates/../secrets.yaml",
+            "custom_templates/../../etc/passwd",
+            "custom_templates/./temperatura.jinja",
+            "custom_templates/nested/../temperatura.jinja",
         ):
             with self.assertRaises(ValueError):
                 mf.validate_policy_path(bad)
@@ -269,6 +273,9 @@ class StagingAndApplyTests(unittest.TestCase):
         allowed = {entry.path for entry in mf.load_policy(ROOT / "import" / "managed_files.yaml").exact}
         self.assertNotIn("packages/ogrzewanie.yaml", allowed)
         self.assertIn("packages/temperatura.yaml", allowed)
+        self.assertIn("custom_templates/temperatura.jinja", allowed)
+        self.assertNotIn("custom_templates/other.jinja", allowed)
+        self.assertNotIn("custom_templates/temperatura.yaml", allowed)
 
     def test_policy_loader_v1_entries(self):
         policy = mf.load_policy(ROOT / "import" / "managed_files.yaml")
@@ -278,12 +285,26 @@ class StagingAndApplyTests(unittest.TestCase):
             [
                 ("packages/temperatura.yaml", "package"),
                 ("www/temperature-card.mjs", "frontend_module"),
+                ("custom_templates/temperatura.jinja", "custom_template"),
             ],
         )
         self.assertEqual(len(policy.prefixes), 1)
         self.assertEqual(policy.prefixes[0].prefix, "www/dashboard/")
         self.assertEqual(policy.prefixes[0].extensions, (".js", ".mjs"))
         self.assertEqual(policy.prefixes[0].profile, "frontend_module")
+        self.assertFalse(
+            any(rule.prefix.startswith("custom_templates/") for rule in policy.prefixes)
+        )
+
+    def test_jinja_live_target_is_ha_config_custom_templates(self):
+        # Supervisor mounts HA /config at /homeassistant inside the App.
+        policy = mf.load_policy(ROOT / "import" / "managed_files.yaml")
+        self.assertEqual(policy.ha_root, Path("/homeassistant"))
+        live = mf.resolve_live_path(policy.ha_root, "custom_templates/temperatura.jinja")
+        self.assertEqual(
+            live.as_posix(),
+            "/homeassistant/custom_templates/temperatura.jinja",
+        )
 
     def test_initialize_missing_bases(self):
         content = "same\n"
@@ -405,6 +426,208 @@ class CollectTests(unittest.TestCase):
             self.assertEqual(changes[0]["warnings"][0]["field"], "unique_id")
             self.assertEqual(changes[0]["warnings"][0]["line"], 3)
             self.assertNotIn("synthetic_unique", str(changes[0]["warnings"]))
+
+
+class CustomTemplateApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "custom_templates").mkdir()
+        (self.root / "packages").mkdir()
+        self.workdir = self.root / "git"
+        (self.workdir / "custom_templates").mkdir(parents=True)
+        (self.workdir / "packages").mkdir(parents=True)
+        self.bases = self.root / "bases.json"
+        self.backup = self.root / "backups"
+        self.journal = self.root / "journal.json"
+        self.last_apply = self.root / "last-apply.json"
+        self.patches = [
+            mock.patch.object(mf, "BASES_PATH", self.bases),
+            mock.patch.object(mf, "BACKUP_ROOT", self.backup),
+            mock.patch.object(mf, "JOURNAL_PATH", self.journal),
+            mock.patch.object(mf, "LAST_APPLY_PATH", self.last_apply),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self.patches:
+            patcher.stop()
+        self.tmp.cleanup()
+
+    def test_discover_does_not_wildcard_custom_templates(self):
+        (self.workdir / "custom_templates" / "temperatura.jinja").write_text(
+            "{% macro x() %}1{% endmacro %}\n", encoding="utf-8"
+        )
+        (self.workdir / "custom_templates" / "other.jinja").write_text(
+            "{% macro y() %}2{% endmacro %}\n", encoding="utf-8"
+        )
+        (self.workdir / "custom_templates" / "notes.yaml").write_text("nope: true\n", encoding="utf-8")
+        policy = mf.load_policy(ROOT / "import" / "managed_files.yaml")
+        discovered = mf.discover_managed_entries(self.workdir, policy)
+        paths = [entry.path for entry in discovered]
+        self.assertIn("custom_templates/temperatura.jinja", paths)
+        self.assertNotIn("custom_templates/other.jinja", paths)
+        self.assertNotIn("custom_templates/notes.yaml", paths)
+        self.assertNotIn("custom_templates/", paths)
+
+    def test_apply_writes_jinja_and_reloads_custom_templates(self):
+        live = self.root / "custom_templates" / "temperatura.jinja"
+        live.write_text("{% macro old() %}0{% endmacro %}\n", encoding="utf-8")
+        git = self.workdir / "custom_templates" / "temperatura.jinja"
+        git.write_text("{% macro new() %}1{% endmacro %}\n", encoding="utf-8")
+        live_hash = mf.file_digest(live.read_bytes())
+        git_hash = mf.file_digest(git.read_bytes())
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "custom_templates/temperatura.jinja", live_hash)
+        mf.save_bases(bases)
+        entries = [mf.ManagedEntry("custom_templates/temperatura.jinja", "custom_template")]
+        calls = []
+
+        def fake_ws(message_type, **payload):
+            calls.append((message_type, payload))
+            return {}
+
+        with mock.patch.object(
+            mf, "ha_check_config", side_effect=AssertionError("package check must not run")
+        ):
+            results, applied = mf.apply_managed_files(
+                ["custom_templates/temperatura.jinja"],
+                {"custom_templates/temperatura.jinja": live_hash},
+                {"custom_templates/temperatura.jinja": git_hash},
+                self.workdir,
+                self.root,
+                entries,
+                unsafe_none,
+                fake_ws,
+                "token",
+                source_ref="main",
+                commit_sha=COMMIT_SHA,
+            )
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(applied, ["custom_templates/temperatura.jinja"])
+        self.assertEqual(live.read_text(encoding="utf-8"), "{% macro new() %}1{% endmacro %}\n")
+        self.assertEqual(
+            calls,
+            [("call_service", {"domain": "homeassistant", "service": "reload_custom_templates"})],
+        )
+        stored = mf.load_bases()["files"]["custom_templates/temperatura.jinja"]
+        self.assertEqual(stored["sha256"], git_hash)
+        self.assertEqual(stored["last_applied"]["source_ref"], "main")
+        self.assertEqual(stored["last_applied"]["commit_sha"], COMMIT_SHA)
+        self.assertEqual(
+            mf.resolve_live_path(self.root, "custom_templates/temperatura.jinja"),
+            live.resolve(),
+        )
+
+    def test_apply_rejects_other_custom_templates_file(self):
+        (self.root / "custom_templates" / "other.jinja").write_text("live\n", encoding="utf-8")
+        (self.workdir / "custom_templates" / "other.jinja").write_text("git\n", encoding="utf-8")
+        (self.workdir / "custom_templates" / "temperatura.jinja").write_text("keep\n", encoding="utf-8")
+        results, applied = mf.apply_managed_files(
+            ["custom_templates/other.jinja"],
+            {"custom_templates/other.jinja": mf.file_digest(b"live\n")},
+            {"custom_templates/other.jinja": mf.file_digest(b"git\n")},
+            self.workdir,
+            self.root,
+            [mf.ManagedEntry("custom_templates/temperatura.jinja", "custom_template")],
+            unsafe_none,
+            lambda *a, **k: {},
+            "token",
+        )
+        self.assertFalse(applied)
+        self.assertTrue(any(not item["ok"] for item in results))
+        self.assertTrue(any("not in managed policy" in item["message"] for item in results))
+        self.assertEqual(
+            (self.root / "custom_templates" / "other.jinja").read_text(encoding="utf-8"),
+            "live\n",
+        )
+
+    def test_jinja_reload_failure_rolls_back(self):
+        live = self.root / "custom_templates" / "temperatura.jinja"
+        live.write_text("old-macro\n", encoding="utf-8")
+        (self.workdir / "custom_templates" / "temperatura.jinja").write_text(
+            "new-macro\n", encoding="utf-8"
+        )
+        live_hash = mf.file_digest(b"old-macro\n")
+        git_hash = mf.file_digest(b"new-macro\n")
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "custom_templates/temperatura.jinja", live_hash)
+        mf.save_bases(bases)
+
+        def boom_ws(*_args, **_kwargs):
+            raise RuntimeError("websocket down")
+
+        results, applied = mf.apply_managed_files(
+            ["custom_templates/temperatura.jinja"],
+            {"custom_templates/temperatura.jinja": live_hash},
+            {"custom_templates/temperatura.jinja": git_hash},
+            self.workdir,
+            self.root,
+            [mf.ManagedEntry("custom_templates/temperatura.jinja", "custom_template")],
+            unsafe_none,
+            boom_ws,
+            "token",
+        )
+        self.assertFalse(applied)
+        self.assertEqual(live.read_text(encoding="utf-8"), "old-macro\n")
+        self.assertTrue(any("rolled back" in item["message"] for item in results))
+
+    def test_package_batch_does_not_double_reload_templates(self):
+        pkg = self.root / "packages" / "temperatura.yaml"
+        jinja = self.root / "custom_templates" / "temperatura.jinja"
+        pkg.write_text("old-pkg\n", encoding="utf-8")
+        jinja.write_text("old-jinja\n", encoding="utf-8")
+        (self.workdir / "packages" / "temperatura.yaml").write_text("new-pkg\n", encoding="utf-8")
+        (self.workdir / "custom_templates" / "temperatura.jinja").write_text(
+            "new-jinja\n", encoding="utf-8"
+        )
+        pkg_live = mf.file_digest(b"old-pkg\n")
+        jinja_live = mf.file_digest(b"old-jinja\n")
+        pkg_git = mf.file_digest(b"new-pkg\n")
+        jinja_git = mf.file_digest(b"new-jinja\n")
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "packages/temperatura.yaml", pkg_live)
+        mf.set_base_hash(bases, "custom_templates/temperatura.jinja", jinja_live)
+        mf.save_bases(bases)
+        calls = []
+
+        def fake_ws(message_type, **payload):
+            calls.append((message_type, payload))
+            return {}
+
+        with mock.patch.object(mf, "ha_check_config", return_value={"result": "valid", "errors": None}):
+            results, applied = mf.apply_managed_files(
+                ["packages/temperatura.yaml", "custom_templates/temperatura.jinja"],
+                {
+                    "packages/temperatura.yaml": pkg_live,
+                    "custom_templates/temperatura.jinja": jinja_live,
+                },
+                {
+                    "packages/temperatura.yaml": pkg_git,
+                    "custom_templates/temperatura.jinja": jinja_git,
+                },
+                self.workdir,
+                self.root,
+                [
+                    mf.ManagedEntry("packages/temperatura.yaml", "package"),
+                    mf.ManagedEntry("custom_templates/temperatura.jinja", "custom_template"),
+                ],
+                unsafe_none,
+                fake_ws,
+                "token",
+            )
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(
+            applied,
+            ["packages/temperatura.yaml", "custom_templates/temperatura.jinja"],
+        )
+        self.assertEqual(pkg.read_text(encoding="utf-8"), "new-pkg\n")
+        self.assertEqual(jinja.read_text(encoding="utf-8"), "new-jinja\n")
+        self.assertEqual(
+            calls,
+            [("call_service", {"domain": "homeassistant", "service": "reload_all"})],
+        )
 
 
 class PrefixDiscoveryTests(unittest.TestCase):

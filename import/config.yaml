@@ -1,6 +1,6 @@
 name: "HA Config Sync — Import"
 description: "Review GitHub changes and apply approved dashboards and managed files to Home Assistant"
-version: "0.8.1"
+version: "0.8.2"
 slug: "ha_config_sync_import"
 url: "https://github.com/BartoszWu/home-assistant-config-sync"
 

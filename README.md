@@ -62,7 +62,7 @@ After the feature is merged to `main` outside Import, open Import on `main` and 
 
 ## Managed files and frontend modules
 
-Exact allowlisted files stay in `import/managed_files.yaml`. In addition, Import discovers `.js` and `.mjs` files under `www/dashboard/` in the pinned commit. New dashboard modules belong in that prefix; `www/temperature-card.mjs` remains on its exact V1 path. Delete is not supported. Live files that are absent from the selected Git revision are left in place.
+Exact allowlisted files stay in `import/managed_files.yaml`: `packages/temperatura.yaml`, `www/temperature-card.mjs`, and `custom_templates/temperatura.jinja` (written to HA `/config/custom_templates/temperatura.jinja`). In addition, Import discovers `.js` and `.mjs` files under `www/dashboard/` in the pinned commit. New dashboard modules belong in that prefix; `www/temperature-card.mjs` remains on its exact V1 path. There is no `custom_templates/*` wildcard. Delete is not supported. Live files that are absent from the selected Git revision are left in place.
 
 Frontend preview staging writes
 `/homeassistant/www/.config-sync-preview/<commit>/…` while preserving directory structure so relative ES module imports resolve. Canonical `www/` paths change only on Apply.
