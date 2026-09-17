@@ -17,6 +17,11 @@ managed_files:
   - path: www/temperature-card.mjs
     profile: frontend_module
 
+  # Exact file only. Do not wildcard custom_templates/.
+  # Addon path /homeassistant maps to HA /config.
+  - path: custom_templates/temperatura.jinja
+    profile: custom_template
+
   - prefix: www/dashboard/
     extensions:
       - .js

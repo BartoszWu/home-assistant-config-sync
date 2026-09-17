@@ -980,7 +980,16 @@ def apply_managed_files(
                     })
 
             for item in other_written:
-                activation = activate(item["entry"].profile, ha_ws_call, token)
+                # reload_all already reloads custom Jinja templates; skip a second call.
+                if item["entry"].profile == "custom_template" and package_written:
+                    activation = {
+                        "ok": True,
+                        "activation": "reloaded",
+                        "message": "Custom templates already reloaded by reload_all.",
+                        "restart_required": False,
+                    }
+                else:
+                    activation = activate(item["entry"].profile, ha_ws_call, token)
                 if not activation.get("ok"):
                     raise RuntimeError(
                         f"{item['entry'].path}: activation failed: {activation.get('message')}"
