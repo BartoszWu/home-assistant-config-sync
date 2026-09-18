@@ -11,6 +11,7 @@ CONTEXT_LINES = 3
 IN_SYNC_STATUSES = frozenset({
     "SAME",
     "IN SYNC — BASE NOT INITIALIZED",
+    "OK",
 })
 
 _ANCHOR_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -37,7 +38,11 @@ def is_changed_review(change: dict) -> bool:
     return change.get("status") not in IN_SYNC_STATUSES
 
 
-def summarize_changed_files(dashboards: list[dict], managed: list[dict]) -> dict:
+def summarize_changed_files(
+    dashboards: list[dict],
+    managed: list[dict],
+    resources: list[dict] | None = None,
+) -> dict:
     files = []
     for change in dashboards:
         if not is_changed_review(change):
@@ -47,6 +52,10 @@ def summarize_changed_files(dashboards: list[dict], managed: list[dict]) -> dict
         if not is_changed_review(change):
             continue
         files.append(_summary_item("managed", change["relative"], change))
+    for change in resources or []:
+        if not is_changed_review(change):
+            continue
+        files.append(_summary_item("resource", change["relative"], change))
     return {
         "count": len(files),
         "added": sum(item["added"] for item in files),

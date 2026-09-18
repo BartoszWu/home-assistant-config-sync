@@ -113,6 +113,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         for p in [patch.object(app, 'WORKDIR', self.repo),
                   patch.object(app, 'refresh_repo', return_value=fake_revision()),
                   patch.object(app, 'ha_dashboard_config', side_effect=lambda _: copy.deepcopy(self.live)),
+                  patch.object(app, 'collect_resource_changes', return_value=[]),
                   patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
                   patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / '.config-sync/live-dashboards.json')]:
             p.start()
@@ -415,6 +416,7 @@ class CreateMissingDashboardApplyTests(unittest.TestCase):
                   patch.object(app, 'refresh_repo', return_value=fake_revision()),
                   patch.object(app, 'ha_dashboard_config', side_effect=self._ha_cfg),
                   patch.object(app, 'ha_registered_url_paths', side_effect=lambda: set(self.registered)),
+                  patch.object(app, 'collect_resource_changes', return_value=[]),
                   patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
                   patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / '.config-sync/live-dashboards.json')]:
             p.start()
@@ -493,6 +495,160 @@ class CreateMissingDashboardApplyTests(unittest.TestCase):
         self.assertIsNone(self.live)
         self.assertIn('rolled back', html)
         export.assert_not_called()
+
+
+class LovelaceResourceApplyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import app as import_app
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                "Install Import's Flask/websocket-client dependencies for Apply tests"
+            ) from exc
+        cls.app_module = import_app
+
+    def setUp(self):
+        app = self.app_module
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / 'dashboards').mkdir()
+        (self.repo / 'state').mkdir()
+        (self.repo / 'www' / 'dashboard').mkdir(parents=True)
+        self.desired = {
+            'views': [{
+                'title': 'Diagnostyka',
+                'icon': 'mdi:heart-pulse',
+                'path': 'diagnostyka',
+            }]
+        }
+        self.relative = 'dashboard-diagnostyka.json'
+        self.resource_url = '/local/dashboard/diagnostyka.mjs'
+        (self.repo / 'dashboards' / self.relative).write_text(json.dumps(self.desired))
+        (self.repo / 'www' / 'dashboard' / 'diagnostyka.mjs').write_text('export {}\n')
+        (self.repo / 'state/dashboard-bases.json').write_text(json.dumps({'dashboards': {}}))
+        self.live = None
+        self.registered = set()
+        self.order = []
+        from managed_files import LovelaceResourceSpec, resource_desired_fingerprint
+        spec = LovelaceResourceSpec(url=self.resource_url, type='module')
+        self.form = {
+            'selected': self.relative,
+            'preview_hash': self.relative + ':' + app.digest(None),
+            'desired_hash': self.relative + ':' + app.digest(self.desired),
+            'resource_selected': self.resource_url,
+            'resource_preview_hash': (
+                self.resource_url + ':' + app.digest(None)
+            ),
+            'resource_desired_hash': (
+                self.resource_url + ':' + app.digest(resource_desired_fingerprint(spec))
+            ),
+            'managed_selected': 'www/dashboard/diagnostyka.mjs',
+            'managed_preview_hash': 'www/dashboard/diagnostyka.mjs:' + ('0' * 64),
+            'managed_desired_hash': 'www/dashboard/diagnostyka.mjs:' + ('a' * 64),
+            'source': 'main',
+            'reviewed_sha': REVIEW_SHA,
+        }
+        from managed_files import ManagedEntry
+        self.entry = ManagedEntry('www/dashboard/diagnostyka.mjs', 'frontend_module')
+        for p in [
+            patch.object(app, 'WORKDIR', self.repo),
+            patch.object(app, 'refresh_repo', return_value=fake_revision()),
+            patch.object(app, 'ha_dashboard_config', side_effect=self._ha_cfg),
+            patch.object(app, 'ha_registered_url_paths', side_effect=lambda: set(self.registered)),
+            patch.object(app, 'managed_entries_for_revision', return_value=[self.entry]),
+            patch.dict('os.environ', {'SUPERVISOR_TOKEN': 'test-token'}, clear=False),
+            patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
+            patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / '.config-sync/live-dashboards.json'),
+        ]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _ha_cfg(self, _relative):
+        return None if self.live is None else copy.deepcopy(self.live)
+
+    def submit(self):
+        app = self.app_module
+        return app.app.test_client().post(
+            '/apply',
+            data=self.form,
+            environ_overrides={'REMOTE_ADDR': '172.30.32.2'},
+        )
+
+    def test_apply_order_is_managed_then_resource_then_dashboard(self):
+        app = self.app_module
+
+        def managed(*_args, **_kwargs):
+            self.order.append('managed')
+            return [{"ok": True, "message": "file"}], [self.entry.path]
+
+        def resources(*_args, **_kwargs):
+            self.order.append('resource')
+            return [{"ok": True, "message": "resource"}], ['res-1']
+
+        def create(_relative, _desired):
+            self.order.append('dashboard-create')
+            self.registered.add('dashboard-diagnostyka')
+            return {'id': 'dashboard-diagnostyka'}
+
+        def save(_relative, value):
+            self.order.append('dashboard-save')
+            self.live = copy.deepcopy(value)
+
+        with patch.object(app, 'apply_managed_files', side_effect=managed), \
+             patch.object(app, 'apply_declared_resources', side_effect=resources), \
+             patch.object(app, 'create_dashboard', side_effect=create), \
+             patch.object(app, 'save_dashboard', side_effect=save), \
+             patch.object(app, 'collect_resource_changes', return_value=[]), \
+             patch.object(app, 'request_export'):
+            html = self.submit().get_data(as_text=True)
+        self.assertEqual(self.order, ['managed', 'resource', 'dashboard-create', 'dashboard-save'])
+        self.assertIn('Created, applied and verified', html)
+
+    def test_failed_dashboard_rolls_back_created_resource_not_existing(self):
+        app = self.app_module
+        deleted = []
+
+        def resources(*_args, **_kwargs):
+            return [{"ok": True, "message": "resource"}], ['res-new']
+
+        def create(_relative, _desired):
+            raise RuntimeError('dashboard create failed')
+
+        with patch.object(app, 'apply_managed_files', return_value=([{"ok": True, "message": "file"}], [self.entry.path])), \
+             patch.object(app, 'apply_declared_resources', side_effect=resources), \
+             patch.object(app, 'create_dashboard', side_effect=create), \
+             patch.object(app, 'rollback_created_resources', side_effect=lambda _ws, ids: deleted.extend(ids)), \
+             patch.object(app, 'collect_resource_changes', return_value=[]), \
+             patch.object(app, 'request_export') as export:
+            html = self.submit().get_data(as_text=True)
+        self.assertEqual(deleted, ['res-new'])
+        self.assertIn('rolled back', html)
+        export.assert_not_called()
+
+    def test_review_does_not_create_or_delete_resources(self):
+        app = self.app_module
+        calls = []
+
+        def ws(message_type, **_payload):
+            calls.append(message_type)
+            if message_type == 'lovelace/resources/list':
+                return []
+            if message_type == 'lovelace/dashboards/list':
+                return []
+            raise AssertionError(f'review must not call {message_type}')
+
+        with patch.object(app, 'ha_ws_call', side_effect=ws), \
+             patch.object(app, 'managed_entries_for_revision', return_value=[]):
+            html = app.app.test_client().get(
+                '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            ).get_data(as_text=True)
+        self.assertNotIn('lovelace/resources/create', calls)
+        self.assertNotIn('lovelace/resources/delete', calls)
+        self.assertIn('lovelace/resources/list', calls)
+        self.assertIn('READY TO APPLY — CREATE RESOURCE', html)
+        self.assertIn(self.resource_url, html)
 
 
 class ResourcePolicyTests(unittest.TestCase):

@@ -73,8 +73,35 @@ Frontend preview staging writes
 deploy, Import updates the matching Lovelace resource URL to include a
 content-derived version query (`/local/…?v=<sha256-prefix>`). This prevents
 stale browser caches without direct `.storage` access. Import lists and updates
-resources through the Home Assistant WebSocket API; it does not create a missing
-resource. An already open dashboard may still require a normal page refresh.
+resources through the Home Assistant WebSocket API. A cache-bust warning does
+not undo the file write. An already open dashboard may still require a normal
+page refresh.
+
+Declared Lovelace resources live in `import/managed_files.yaml`:
+
+```yaml
+resources:
+  - url: /local/dashboard/diagnostyka.mjs
+    type: module
+```
+
+They are not inferred from managed files or `custom:*` cards. Review is
+read-only (`lovelace/resources/list`). Missing → `READY TO APPLY — CREATE RESOURCE`;
+same URL + `module` → `OK`; same URL, other type → `CONFLICT` (no automatic
+change). Apply creates only missing declared resources via
+`lovelace/resources/create`, is idempotent, and deletes a resource only if this
+Apply created it and a later step fails.
+
+Apply order:
+
+```text
+Managed File
+→ create missing Resource
+→ create missing Dashboard
+→ save dashboard config
+→ provenance
+→ verification
+```
 
 For a dashboard JSON that exists in Git but is not registered in Home
 Assistant, Import 0.10 labels it `READY TO APPLY — CREATE DASHBOARD`. Apply

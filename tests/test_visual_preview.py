@@ -172,7 +172,8 @@ class PreviewHttpTests(unittest.TestCase):
         }
         self.patches = [patch.object(app, "refresh_repo", return_value=fake_revision()),
                         patch.object(app, "collect_changes", return_value=[self.change]),
-                        patch.object(app, "collect_managed_changes", return_value=([], {}))]
+                        patch.object(app, "collect_managed_changes", return_value=([], {})),
+                        patch.object(app, "collect_resource_changes", return_value=[])]
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.patches.extend([

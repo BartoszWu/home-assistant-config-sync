@@ -297,6 +297,10 @@ class StagingAndApplyTests(unittest.TestCase):
         card = next(entry for entry in policy.exact if entry.path == "www/temperature-card.mjs")
         self.assertEqual(card.resource_url, "/local/temperature-card.mjs")
         self.assertEqual(card.cache_bust, "content_hash")
+        self.assertEqual(
+            [(spec.url, spec.type) for spec in policy.resources],
+            [("/local/dashboard/diagnostyka.mjs", "module")],
+        )
         self.assertFalse(
             any(rule.prefix.startswith("custom_templates/") for rule in policy.prefixes)
         )
@@ -866,18 +870,32 @@ class PrefixApplyTests(unittest.TestCase):
 
 
 class FakeLovelace:
-    def __init__(self, resources, *, fail_list=False, fail_update=False):
+    def __init__(
+        self,
+        resources,
+        *,
+        fail_list=False,
+        fail_update=False,
+        fail_create=False,
+        fail_delete=False,
+        fail_list_after_create=False,
+    ):
         self.resources = [dict(item) for item in resources]
         self.fail_list = fail_list
         self.fail_update = fail_update
+        self.fail_create = fail_create
+        self.fail_delete = fail_delete
+        self.fail_list_after_create = fail_list_after_create
         self.calls = []
+        self._next_id = 1
+        self._created = False
 
     def __call__(self, message_type, **payload):
         self.calls.append((message_type, payload))
         if message_type == "call_service":
             return {}
         if message_type == "lovelace/resources/list":
-            if self.fail_list:
+            if self.fail_list or (self.fail_list_after_create and self._created):
                 raise RuntimeError("websocket down")
             return [dict(item) for item in self.resources]
         if message_type == "lovelace/resources/update":
@@ -891,6 +909,29 @@ class FakeLovelace:
                     item["url"] = payload["url"]
                     return dict(item)
             raise RuntimeError("resource not found")
+        if message_type == "lovelace/resources/create":
+            if self.fail_create:
+                raise RuntimeError("create failed")
+            if "type" in payload:
+                raise AssertionError("create must send res_type, not type")
+            item = {
+                "id": f"res-new-{self._next_id}",
+                "url": payload["url"],
+                "type": payload["res_type"],
+            }
+            self._next_id += 1
+            self.resources.append(item)
+            self._created = True
+            return dict(item)
+        if message_type == "lovelace/resources/delete":
+            if self.fail_delete:
+                raise RuntimeError("delete failed")
+            resource_id = payload["resource_id"]
+            kept = [item for item in self.resources if item["id"] != resource_id]
+            if len(kept) == len(self.resources):
+                raise RuntimeError("resource not found")
+            self.resources = kept
+            return None
         raise AssertionError(f"unexpected WebSocket command: {message_type}")
 
 
@@ -1118,6 +1159,128 @@ class FrontendCacheBustTests(unittest.TestCase):
         self.assertEqual(updated["url"], desired)
         self.assertEqual(updated["resource_id"], "res-1")
         self.assertEqual(update_ws.resources[0]["type"], "module")
+
+
+class LovelaceResourceDesiredStateTests(unittest.TestCase):
+    URL = "/local/dashboard/diagnostyka.mjs"
+
+    def spec(self):
+        return mf.LovelaceResourceSpec(url=self.URL, type="module")
+
+    def policy(self):
+        return mf.ManagedPolicy(
+            ha_root=Path("/homeassistant"),
+            exact=(),
+            prefixes=(),
+            resources=(self.spec(),),
+        )
+
+    def hashes(self, live_fp):
+        desired = mf.resource_desired_fingerprint(self.spec())
+        return {
+            self.URL: mf.digest(live_fp),
+        }, {
+            self.URL: mf.digest(desired),
+        }
+
+    def test_missing_resource_is_create_ready(self):
+        status, css, selectable, reason = mf.classify_resource(self.spec(), [])
+        self.assertEqual(status, mf.RESOURCE_CREATE_STATUS)
+        self.assertEqual(css, "bootstrap")
+        self.assertTrue(selectable)
+        self.assertEqual(reason, mf.RESOURCE_CREATE_REASON)
+
+    def test_matching_module_resource_is_ok(self):
+        matches = [{"id": "res-1", "type": "module", "url": self.URL + "?v=abc"}]
+        status, css, selectable, _ = mf.classify_resource(self.spec(), matches)
+        self.assertEqual(status, mf.RESOURCE_OK_STATUS)
+        self.assertEqual(css, "same")
+        self.assertFalse(selectable)
+
+    def test_same_url_wrong_type_is_conflict(self):
+        matches = [{"id": "res-1", "type": "js", "url": self.URL}]
+        status, css, selectable, reason = mf.classify_resource(self.spec(), matches)
+        self.assertEqual(status, "CONFLICT")
+        self.assertEqual(css, "conflict")
+        self.assertFalse(selectable)
+        self.assertEqual(reason, mf.RESOURCE_TYPE_CONFLICT_REASON)
+
+    def test_review_lists_without_mutating_ha(self):
+        ws = FakeLovelace([])
+        changes = mf.collect_resource_changes(self.policy(), ws)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]["status"], mf.RESOURCE_CREATE_STATUS)
+        self.assertEqual([kind for kind, _ in ws.calls], ["lovelace/resources/list"])
+        self.assertEqual(ws.resources, [])
+
+    def test_create_resource_and_idempotent_reapply(self):
+        ws = FakeLovelace([])
+        previews, desired = self.hashes(None)
+        results, created = mf.apply_declared_resources(
+            [self.URL], previews, desired, self.policy(), ws
+        )
+        self.assertTrue(results[0]["ok"])
+        self.assertEqual(created, ["res-new-1"])
+        self.assertEqual(ws.resources[0]["url"], self.URL)
+        self.assertEqual(ws.resources[0]["type"], "module")
+        self.assertIn(
+            ("lovelace/resources/create", {"url": self.URL, "res_type": "module"}),
+            ws.calls,
+        )
+
+        live_fp = mf.resource_live_fingerprint(self.spec(), ws.resources)
+        previews, desired = self.hashes(live_fp)
+        again, created_again = mf.apply_declared_resources(
+            [self.URL], previews, desired, self.policy(), ws
+        )
+        self.assertTrue(again[0]["ok"])
+        self.assertIn("already present", again[0]["message"])
+        self.assertEqual(created_again, [])
+        self.assertEqual(
+            [kind for kind, _ in ws.calls].count("lovelace/resources/create"),
+            1,
+        )
+
+    def test_rollback_deletes_new_resource_and_keeps_existing(self):
+        existing = {"id": "keep-me", "type": "module", "url": "/local/temperature-card.mjs"}
+        ws = FakeLovelace([existing], fail_create=True)
+        previews, desired = self.hashes(None)
+        results, created = mf.apply_declared_resources(
+            [self.URL], previews, desired, self.policy(), ws
+        )
+        self.assertFalse(results[-1]["ok"])
+        self.assertEqual(created, [])
+        self.assertEqual(ws.resources, [existing])
+        self.assertNotIn("lovelace/resources/delete", [kind for kind, _ in ws.calls])
+
+        ws = FakeLovelace([existing], fail_list_after_create=True)
+        results, created = mf.apply_declared_resources(
+            [self.URL], previews, desired, self.policy(), ws
+        )
+        self.assertFalse(results[-1]["ok"])
+        self.assertEqual(created, [])
+        self.assertEqual(
+            [item["id"] for item in ws.resources],
+            ["keep-me"],
+        )
+        self.assertIn("lovelace/resources/delete", [kind for kind, _ in ws.calls])
+
+    def test_policy_rejects_guessed_or_invalid_resources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "managed_files.yaml"
+            path.write_text(
+                "schema_version: 1\n"
+                "ha_config_root: /homeassistant\n"
+                "managed_files:\n"
+                "  - path: packages/temperatura.yaml\n"
+                "    profile: package\n"
+                "resources:\n"
+                "  - url: /local/dashboard/diagnostyka.mjs\n"
+                "    type: js\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(RuntimeError):
+                mf.load_policy(path)
 
 
 if __name__ == "__main__":

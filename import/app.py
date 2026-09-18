@@ -49,12 +49,15 @@ from deployment_provenance import (
     save_store,
 )
 from managed_files import (
+    apply_declared_resources,
     apply_managed_files,
     collect_managed_changes,
+    collect_resource_changes,
     discover_managed_entries,
     initialize_missing_bases,
     load_policy,
     record_last_apply,
+    rollback_created_resources,
     validate_policy_path,
 )
 from review_warnings import format_scan_warnings
@@ -75,6 +78,7 @@ IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
 MAX_DASHBOARD_SELECTED = 20
 MAX_MANAGED_SELECTED = 50
+MAX_RESOURCE_SELECTED = 20
 
 from security import unsafe_reason
 
@@ -254,6 +258,9 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% if managed_policy_error %}
 <div class="card error"><strong>Managed files policy error:</strong> {{ managed_policy_error }}</div>
 {% endif %}
+{% if resource_error %}
+<div class="card error"><strong>Lovelace resources:</strong> {{ resource_error }}</div>
+{% endif %}
 
 {% for result in results or [] %}
 <div class="result {% if not result.ok %}bad{% endif %}">{{ result.message }}</div>
@@ -399,6 +406,26 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </section>
 {%- endmacro %}
 
+{% macro resource_card(change) -%}
+<section class="card" id="{{ change.anchor }}">
+  <div class="change-head">
+    {% if change.selectable %}
+    <input type="checkbox" name="resource_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
+    <input type="hidden" name="resource_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+    <input type="hidden" name="resource_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
+    {% endif %}
+    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
+    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
+  </div>
+  <div class="small">Lovelace resource · type <code>{{ change.resource_type }}</code> · review {{ git_source.short_sha if git_source else '-' }}</div>
+  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
+  <details {% if change.status != 'OK' %}open{% endif %}>
+    <summary>Review changes</summary>
+    {{ render_diff(change)|safe }}
+  </details>
+</section>
+{%- endmacro %}
+
 <form id="apply-form" method="post" action="apply">
 {% if git_source %}
 <input type="hidden" name="source" value="{{ git_source.source_ref if git_source.source_kind == 'branch' else 'main' }}">
@@ -407,7 +434,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% endif %}
 <input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">
 {% endif %}
-{% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
+{% if not changes and not managed_changes and not resource_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code>, managed files listed in Import policy, or declared Lovelace resources.</p></div>{% endif %}
 {% if file_summary.count %}
 <nav class="card files-changed" aria-label="Changed files">
   <h2>Changed files</h2>
@@ -436,7 +463,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% for change in changed_managed %}{{ managed_card(change)|safe }}{% endfor %}
 {% endif %}
 
-{% if unchanged_dashboards or unchanged_managed %}
+{% if changed_resources %}
+<h2>Lovelace resources</h2>
+<p class="small">Declared in Import <code>managed_files.yaml</code>. Apply creates a missing resource; a type mismatch stays a conflict.</p>
+{% for change in changed_resources %}{{ resource_card(change)|safe }}{% endfor %}
+{% endif %}
+
+{% if unchanged_dashboards or unchanged_managed or unchanged_resources %}
 <details class="unchanged-files">
   <summary>Unchanged files ({{ unchanged_count }})</summary>
   {% if unchanged_dashboards %}<h2>Dashboards</h2>{% endif %}
@@ -444,6 +477,10 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   {% if unchanged_managed %}
   <h2>Managed files</h2>
   {% for change in unchanged_managed %}{{ managed_card(change)|safe }}{% endfor %}
+  {% endif %}
+  {% if unchanged_resources %}
+  <h2>Lovelace resources</h2>
+  {% for change in unchanged_resources %}{{ resource_card(change)|safe }}{% endfor %}
   {% endif %}
 </details>
 {% endif %}
@@ -508,9 +545,9 @@ if (form) {
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (form.dataset.submitting === 'true' || pageIsBusy()) return;
-    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked');
+    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked, input[name="resource_selected"]:checked');
     if (!selected.length) {
-      window.alert('Select at least one dashboard or managed file ready to apply.');
+      window.alert('Select at least one dashboard, managed file, or Lovelace resource ready to apply.');
       return;
     }
     form.dataset.submitting = 'true';
@@ -932,8 +969,10 @@ def stale_source_message(revision: SourceRevision) -> str:
 
 def render_review(results=None, *, source=None, pin_sha=None):
     error = None
+    resource_error = None
     changes = []
     managed_changes = []
+    resource_changes = []
     revision = source
     with REPO_LOCK:
         try:
@@ -967,6 +1006,13 @@ def render_review(results=None, *, source=None, pin_sha=None):
                         None if live_entry is None else live_entry.short_sha()
                     )
                 managed_changes = [public_managed_change(item) for item in managed_changes]
+            if MANAGED_POLICY is not None and not MANAGED_POLICY_ERROR:
+                try:
+                    resource_changes = collect_resource_changes(
+                        MANAGED_POLICY, ha_ws_call
+                    )
+                except Exception as exception:
+                    resource_error = str(exception)
         except InvalidSourceRef as exception:
             error = str(exception)
             revision = revision if isinstance(revision, SourceRevision) else SourceRevision.fallback()
@@ -979,21 +1025,29 @@ def render_review(results=None, *, source=None, pin_sha=None):
         and (
             any(change["selectable"] for change in changes)
             or any(change["selectable"] for change in managed_changes)
+            or any(change["selectable"] for change in resource_changes)
         )
     )
     return render_template_string(
         TEMPLATE,
         changes=changes,
         managed_changes=managed_changes,
+        resource_changes=resource_changes,
         changed_dashboards=[item for item in changes if is_changed_review(item)],
         unchanged_dashboards=[item for item in changes if not is_changed_review(item)],
         changed_managed=[item for item in managed_changes if is_changed_review(item)],
         unchanged_managed=[item for item in managed_changes if not is_changed_review(item)],
+        changed_resources=[item for item in resource_changes if is_changed_review(item)],
+        unchanged_resources=[item for item in resource_changes if not is_changed_review(item)],
         unchanged_count=sum(
-            1 for item in (*changes, *managed_changes) if not is_changed_review(item)
+            1 for item in (*changes, *managed_changes, *resource_changes)
+            if not is_changed_review(item)
         ),
-        file_summary=summarize_changed_files(changes, managed_changes),
+        file_summary=summarize_changed_files(
+            changes, managed_changes, resource_changes
+        ),
         managed_policy_error=MANAGED_POLICY_ERROR,
+        resource_error=resource_error,
         error=error,
         commit=revision.short_sha if revision else "-",
         git_source=revision,
@@ -1018,7 +1072,8 @@ def index():
 def apply_selected():
     selected = request.form.getlist("selected")
     managed_selected = request.form.getlist("managed_selected")
-    if not selected and not managed_selected:
+    resource_selected = request.form.getlist("resource_selected")
+    if not selected and not managed_selected and not resource_selected:
         return render_review([{"ok": False, "message": "No READY item selected."}])
     if (
         len(selected) > MAX_DASHBOARD_SELECTED
@@ -1032,10 +1087,20 @@ def apply_selected():
         or len(set(managed_selected)) != len(managed_selected)
     ):
         abort(400)
+    if (
+        len(resource_selected) > MAX_RESOURCE_SELECTED
+        or len(set(resource_selected)) != len(resource_selected)
+    ):
+        abort(400)
     try:
         for value in managed_selected:
             validate_policy_path(value)
     except ValueError:
+        abort(400)
+    allowed_resources = {
+        spec.url for spec in (MANAGED_POLICY.resources if MANAGED_POLICY else ())
+    }
+    if any(value not in allowed_resources for value in resource_selected):
         abort(400)
 
     reviewed_sha = (request.form.get("reviewed_sha") or "").strip()
@@ -1046,6 +1111,8 @@ def apply_selected():
     desired_previews = {}
     managed_previews = {}
     managed_desired = {}
+    resource_previews = {}
+    resource_desired = {}
     try:
         requested_ref, _kind = requested_source_from_request()
         if selected:
@@ -1059,6 +1126,18 @@ def apply_selected():
             if any(
                 relative not in managed_previews or relative not in managed_desired
                 for relative in managed_selected
+            ):
+                abort(400)
+        if resource_selected:
+            resource_previews = parse_preview_hashes(
+                request.form.getlist("resource_preview_hash")
+            )
+            resource_desired = parse_preview_hashes(
+                request.form.getlist("resource_desired_hash")
+            )
+            if any(
+                url not in resource_previews or url not in resource_desired
+                for url in resource_selected
             ):
                 abort(400)
     except InvalidSourceRef:
@@ -1094,7 +1173,60 @@ def apply_selected():
             if any(value not in allowed_managed for value in managed_selected):
                 abort(400)
             store = live_provenance_store()
-            if selected:
+            created_resource_ids = []
+            resource_failed = False
+            if managed_selected:
+                token = os.environ.get("SUPERVISOR_TOKEN")
+                if not token:
+                    raise RuntimeError("SUPERVISOR_TOKEN is unavailable.")
+                managed_results, managed_applied = apply_managed_files(
+                    managed_selected,
+                    managed_previews,
+                    managed_desired,
+                    WORKDIR,
+                    HA_CONFIG_ROOT,
+                    entries,
+                    unsafe_reason,
+                    ha_ws_call,
+                    token,
+                    source_ref=revision.source_ref,
+                    commit_sha=revision.commit_sha,
+                )
+                results.extend(managed_results)
+            if managed_applied:
+                try:
+                    store = record_artifacts(
+                        store,
+                        source_ref=revision.source_ref,
+                        source_kind=revision.source_kind,
+                        commit_sha=revision.commit_sha,
+                        managed_files={
+                            relative: managed_desired[relative]
+                            for relative in managed_applied
+                        },
+                    )
+                    persist_provenance(store)
+                except (OSError, InvalidProvenance):
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            "Managed files were applied, but provenance metadata "
+                            "could not be stored."
+                        ),
+                    })
+            if resource_selected:
+                resource_results, created_resource_ids = apply_declared_resources(
+                    resource_selected,
+                    resource_previews,
+                    resource_desired,
+                    MANAGED_POLICY,
+                    ha_ws_call,
+                )
+                results.extend(resource_results)
+                resource_failed = any(not item.get("ok") for item in resource_results)
+                if resource_failed:
+                    created_resource_ids = []
+            if selected and not resource_failed:
                 fresh = {
                     change["relative"]: change
                     for change in collect_changes(revision=revision)
@@ -1208,43 +1340,22 @@ def apply_selected():
                         "message": f"{relative}: {applied_label}",
                     })
                     applied.append(relative)
-            if managed_selected:
-                token = os.environ.get("SUPERVISOR_TOKEN")
-                if not token:
-                    raise RuntimeError("SUPERVISOR_TOKEN is unavailable.")
-                managed_results, managed_applied = apply_managed_files(
-                    managed_selected,
-                    managed_previews,
-                    managed_desired,
-                    WORKDIR,
-                    HA_CONFIG_ROOT,
-                    entries,
-                    unsafe_reason,
-                    ha_ws_call,
-                    token,
-                    source_ref=revision.source_ref,
-                    commit_sha=revision.commit_sha,
-                )
-                results.extend(managed_results)
-            if managed_applied:
+            if created_resource_ids and selected and not applied:
                 try:
-                    store = record_artifacts(
-                        store,
-                        source_ref=revision.source_ref,
-                        source_kind=revision.source_kind,
-                        commit_sha=revision.commit_sha,
-                        managed_files={
-                            relative: managed_desired[relative]
-                            for relative in managed_applied
-                        },
-                    )
-                    persist_provenance(store)
-                except (OSError, InvalidProvenance):
+                    rollback_created_resources(ha_ws_call, created_resource_ids)
                     results.append({
                         "ok": False,
                         "message": (
-                            "Managed files were applied, but provenance metadata "
-                            "could not be stored."
+                            "Created Lovelace resources were rolled back after "
+                            "dashboard Apply failed."
+                        ),
+                    })
+                except Exception as rollback_error:
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            "Dashboard Apply failed, and rolling back created "
+                            f"Lovelace resources also failed: {rollback_error}"
                         ),
                     })
             if applied or managed_applied:
