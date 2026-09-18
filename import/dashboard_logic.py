@@ -87,6 +87,25 @@ def is_empty_dashboard(config):
     return _contains_only_empty_heading_cards(section.get("cards"))
 
 
+def _canonical_effective_base(base, github_hash, current_hash, provenance):
+    """Prefer last canonical Apply as BASE when Export's Git BASE is stale.
+
+    Export `state/dashboard-bases.json` moves only after a successful dashboard
+    sync. A verified Import Apply from `main` already recorded the last common
+    Git↔LIVE hash in provenance. If that hash still matches Git or LIVE and the
+    exported BASE matches neither, using the stale BASE would label a Git-only
+    (or HA-only) change as CONFLICT.
+    """
+    applied_hash = getattr(provenance, "content_hash", None)
+    if not isinstance(applied_hash, str) or not HASH_RE.fullmatch(applied_hash):
+        return base
+    export_agrees = isinstance(base, str) and base in {github_hash, current_hash}
+    apply_agrees = applied_hash in {github_hash, current_hash}
+    if apply_agrees and not export_agrees:
+        return applied_hash
+    return base
+
+
 def classify_with_provenance(
     github,
     current,
@@ -138,7 +157,17 @@ def classify_with_provenance(
         elif status == "SAME":
             reason = f"Git source matches LIVE ({source_ref} @ {short})."
         return status, css, selectable, reason, False
-    status, css, selectable, reason = classify(github, current, base, unsafe=unsafe)
+    effective_base = base
+    if provenance is not None and getattr(provenance, "canonical", False):
+        effective_base = _canonical_effective_base(
+            base,
+            digest(github),
+            live_hash or digest(current),
+            provenance,
+        )
+    status, css, selectable, reason = classify(
+        github, current, effective_base, unsafe=unsafe
+    )
     return status, css, selectable, reason, False
 
 
