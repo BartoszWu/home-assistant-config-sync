@@ -55,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.9.0` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.10.0` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.10.1` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -229,7 +229,8 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
   `import/managed_files.yaml`. Prefix rules may discover `.js`/`.mjs` files
   under `www/dashboard/` in the pinned commit. The data repository cannot expand
   prefixes. Exact files currently include `packages/temperatura.yaml`,
-  `www/temperature-card.mjs`, and `custom_templates/temperatura.jinja`.
+  `packages/diagnostyka.yaml`, `www/temperature-card.mjs`, and
+  `custom_templates/temperatura.jinja`.
   Delete is not supported.
 - Path traversal and nested dashboard paths are rejected.
 - Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs. Hits are review warnings with field path and source line; they do not hide the Apply checkbox. Apply still requires explicit selection, a fresh conflict check, and read-back verification. Warnings never echo matched values.
