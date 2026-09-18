@@ -171,6 +171,139 @@ class DashboardLogicTests(unittest.TestCase):
         self.assertFalse(adopt)
         self.assertIn("Canonical main sync is disabled", reason)
 
+    def test_stale_export_base_does_not_block_canonical_git_only_change(self):
+        from types import SimpleNamespace
+
+        applied = DESIRED_DASHBOARD
+        github = {
+            "views": [
+                {
+                    "type": "sections",
+                    "title": "AGD",
+                    "sections": [
+                        {
+                            "type": "grid",
+                            "cards": [
+                                {"type": "markdown", "content": "AGD plus weather"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        stale_export_base = digest(EMPTY_DASHBOARD)
+        provenance = SimpleNamespace(
+            canonical=True,
+            content_hash=digest(applied),
+            source_ref="main",
+        )
+        status, _, selectable, _, adopt = classify_with_provenance(
+            github,
+            applied,
+            stale_export_base,
+            reviewing_canonical=True,
+            provenance=provenance,
+        )
+        self.assertEqual(status, "READY TO APPLY")
+        self.assertTrue(selectable)
+        self.assertFalse(adopt)
+
+    def test_stale_export_base_still_reports_ha_only_canonical_drift(self):
+        from types import SimpleNamespace
+
+        applied = EMPTY_DASHBOARD
+        live = DESIRED_DASHBOARD
+        stale_export_base = digest({"views": []})
+        provenance = SimpleNamespace(
+            canonical=True,
+            content_hash=digest(applied),
+            source_ref="main",
+        )
+        status, _, selectable, _, adopt = classify_with_provenance(
+            applied,
+            live,
+            stale_export_base,
+            reviewing_canonical=True,
+            provenance=provenance,
+        )
+        self.assertEqual(status, "CHANGED IN HA")
+        self.assertFalse(selectable)
+        self.assertFalse(adopt)
+
+    def test_export_base_wins_when_it_matches_live_after_ha_round_trip(self):
+        from types import SimpleNamespace
+
+        live = DESIRED_DASHBOARD
+        github = {
+            "views": [
+                {
+                    "type": "sections",
+                    "title": "AGD",
+                    "sections": [
+                        {
+                            "type": "grid",
+                            "cards": [
+                                {"type": "markdown", "content": "newer git"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        older_apply = EMPTY_DASHBOARD
+        provenance = SimpleNamespace(
+            canonical=True,
+            content_hash=digest(older_apply),
+            source_ref="main",
+        )
+        status, _, selectable, _, adopt = classify_with_provenance(
+            github,
+            live,
+            digest(live),
+            reviewing_canonical=True,
+            provenance=provenance,
+        )
+        self.assertEqual(status, "READY TO APPLY")
+        self.assertTrue(selectable)
+        self.assertFalse(adopt)
+
+    def test_canonical_true_conflict_when_git_and_ha_both_left_last_apply(self):
+        from types import SimpleNamespace
+
+        applied = EMPTY_DASHBOARD
+        github = DESIRED_DASHBOARD
+        live = {
+            "views": [
+                {
+                    "type": "sections",
+                    "title": "manual",
+                    "sections": [
+                        {
+                            "type": "grid",
+                            "cards": [
+                                {"type": "markdown", "content": "manual HA"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        provenance = SimpleNamespace(
+            canonical=True,
+            content_hash=digest(applied),
+            source_ref="main",
+        )
+        status, _, selectable, _, adopt = classify_with_provenance(
+            github,
+            live,
+            digest({"views": [{"title": "even-older-export"}]}),
+            reviewing_canonical=True,
+            provenance=provenance,
+        )
+        self.assertEqual(status, "CONFLICT")
+        self.assertFalse(selectable)
+        self.assertFalse(adopt)
+
     def test_preview_hash_detects_any_ha_change_even_if_still_empty(self):
         preview = digest(EMPTY_DASHBOARD)
         changed = {

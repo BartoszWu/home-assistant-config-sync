@@ -60,6 +60,8 @@ Non-canonical Apply is not SUCCESS until provenance persists and is read back. I
 
 After the feature is merged to `main` outside Import, open Import on `main` and Refresh. If LIVE hash equals Git `main`, Import marks that dashboard `CANONICAL MAIN` without rewriting the identical dashboard. Manual HA edits during a feature deployment stay conflicts in Import; Export will not publish them to `main`.
 
+If a later Git change lands before Export has moved `state/dashboard-bases.json`, Import still treats the last canonical Apply hash as BASE whenever that hash still matches Git or LIVE. A Git-only follow-up stays `READY TO APPLY` instead of a false `CONFLICT`. Export's BASE remains authoritative when it already matches Git or LIVE.
+
 ## Managed files and frontend modules
 
 Exact allowlisted files stay in `import/managed_files.yaml`: `packages/temperatura.yaml`, `www/temperature-card.mjs`, and `custom_templates/temperatura.jinja` (written to HA `/config/custom_templates/temperatura.jinja`). In addition, Import discovers `.js` and `.mjs` files under `www/dashboard/` in the pinned commit. New dashboard modules belong in that prefix; `www/temperature-card.mjs` remains on its exact V1 path. There is no `custom_templates/*` wildcard. Delete is not supported. Live files that are absent from the selected Git revision are left in place.
