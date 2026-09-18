@@ -20,8 +20,10 @@ from dashboard_logic import (
     APPLYABLE_STATUSES,
     MISSING_BASE_STATUS,
     HASH_RE,
+    digest,
+    matches_preview,
 )
-from diff_view import compare_text, empty as empty_diff, file_anchor, hunk_rows
+from diff_view import compare_json, compare_text, empty as empty_diff, file_anchor, hunk_rows
 from review_warnings import format_scan_warnings
 
 POLICY_PATH = Path(__file__).with_name("managed_files.yaml")
@@ -44,6 +46,22 @@ RELATIVE_IMPORT_RE = re.compile(
 # Requires explicit checkbox selection; Initialize bases never adopts this drift.
 MANAGED_BOOTSTRAP_STATUS = "READY TO APPLY — NO BASE"
 MANAGED_APPLYABLE_STATUSES = frozenset(APPLYABLE_STATUSES | {MANAGED_BOOTSTRAP_STATUS})
+RESOURCE_CREATE_STATUS = "READY TO APPLY — CREATE RESOURCE"
+RESOURCE_OK_STATUS = "OK"
+RESOURCE_APPLYABLE_STATUSES = frozenset({RESOURCE_CREATE_STATUS})
+RESOURCE_CREATE_REASON = (
+    "HA has no Lovelace resource at this URL. "
+    "Apply will create it as type module."
+)
+RESOURCE_OK_REASON = "Lovelace resource already exists with the desired type."
+RESOURCE_TYPE_CONFLICT_REASON = (
+    "A Lovelace resource exists at this URL with a different type. "
+    "Import will not change it."
+)
+RESOURCE_AMBIGUOUS_REASON = (
+    "Multiple Lovelace resources match this URL; Import will not guess resource_id."
+)
+ALLOWED_RESOURCE_TYPES = frozenset({"module"})
 
 APPLY_LOCK = threading.RLock()
 
@@ -95,10 +113,17 @@ class PrefixRule:
 
 
 @dataclass(frozen=True)
+class LovelaceResourceSpec:
+    url: str
+    type: str
+
+
+@dataclass(frozen=True)
 class ManagedPolicy:
     ha_root: Path
     exact: tuple[ManagedEntry, ...]
     prefixes: tuple[PrefixRule, ...]
+    resources: tuple[LovelaceResourceSpec, ...] = ()
 
     @property
     def entries(self) -> list[ManagedEntry]:
@@ -160,7 +185,12 @@ def load_policy(path: Path | None = None) -> ManagedPolicy:
             resource_url=resource_url,
             cache_bust=cache_bust,
         ))
-    return ManagedPolicy(ha_root=Path(root), exact=tuple(entries), prefixes=tuple(prefixes))
+    return ManagedPolicy(
+        ha_root=Path(root),
+        exact=tuple(entries),
+        prefixes=tuple(prefixes),
+        resources=_parse_resources(raw.get("resources")),
+    )
 
 
 def _parse_prefix_rule(item: dict, profile: str, seen_prefixes: set[str]) -> PrefixRule:
@@ -257,6 +287,38 @@ def _parse_cache_bust_fields(
     if cache_bust is None:
         raise RuntimeError("resource_url requires cache_bust.")
     return resource_url, cache_bust
+
+
+def _parse_resources(raw) -> tuple[LovelaceResourceSpec, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise RuntimeError("resources must be a list.")
+    specs: list[LovelaceResourceSpec] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RuntimeError("Each resources entry must be a mapping.")
+        url = item.get("url")
+        resource_type = item.get("type")
+        extra = set(item) - {"url", "type"}
+        if extra:
+            raise RuntimeError(f"Unknown resources fields: {sorted(extra)}")
+        if not isinstance(url, str):
+            raise RuntimeError("resources url must be a string.")
+        try:
+            validate_resource_url(url)
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if resource_type not in ALLOWED_RESOURCE_TYPES:
+            raise RuntimeError(
+                f"resources type must be one of {sorted(ALLOWED_RESOURCE_TYPES)}."
+            )
+        if url in seen:
+            raise RuntimeError(f"Duplicate resources url: {url}")
+        seen.add(url)
+        specs.append(LovelaceResourceSpec(url=url, type=resource_type))
+    return tuple(specs)
 
 
 def validate_policy_path(relative: str) -> None:
@@ -830,6 +892,194 @@ def find_matching_lovelace_resources(resources: list, resource_url: str) -> list
         if isinstance(url, str) and resource_urls_match(url, resource_url):
             matches.append(item)
     return matches
+
+
+def live_resource_type(item: dict) -> str | None:
+    value = item.get("type")
+    if not isinstance(value, str):
+        value = item.get("res_type")
+    return value if isinstance(value, str) else None
+
+
+def resource_desired_fingerprint(spec: LovelaceResourceSpec) -> dict:
+    return {"url": spec.url, "type": spec.type}
+
+
+def resource_live_fingerprint(spec: LovelaceResourceSpec, matches: list[dict]):
+    if not matches:
+        return None
+    if len(matches) > 1:
+        return {"url": spec.url, "matches": len(matches)}
+    current = matches[0]
+    current_url = current.get("url")
+    return {
+        "url": resource_url_path(current_url) if isinstance(current_url, str) else spec.url,
+        "type": live_resource_type(current),
+    }
+
+
+def classify_resource(spec: LovelaceResourceSpec, matches: list[dict]):
+    if not matches:
+        return RESOURCE_CREATE_STATUS, "bootstrap", True, RESOURCE_CREATE_REASON
+    if len(matches) > 1:
+        return "CONFLICT", "conflict", False, RESOURCE_AMBIGUOUS_REASON
+    current_type = live_resource_type(matches[0])
+    if current_type == spec.type:
+        return RESOURCE_OK_STATUS, "same", False, RESOURCE_OK_REASON
+    return "CONFLICT", "conflict", False, RESOURCE_TYPE_CONFLICT_REASON
+
+
+def collect_resource_changes(policy: ManagedPolicy | None, ha_ws_call) -> list[dict]:
+    """Read-only review of declared Lovelace resources. Never creates or deletes."""
+    if policy is None or not policy.resources:
+        return []
+    live = list_lovelace_resources(ha_ws_call)
+    changes = []
+    for spec in policy.resources:
+        matches = find_matching_lovelace_resources(live, spec.url)
+        status, css, selectable, reason = classify_resource(spec, matches)
+        live_fp = resource_live_fingerprint(spec, matches)
+        desired_fp = resource_desired_fingerprint(spec)
+        diff = compare_json(live_fp, desired_fp)
+        changes.append({
+            "kind": "resource",
+            "relative": spec.url,
+            "name": spec.url,
+            "url": spec.url,
+            "resource_type": spec.type,
+            "status": status,
+            "css": css,
+            "selectable": selectable,
+            "reason": reason,
+            "anchor": file_anchor("resource", spec.url),
+            "diff": diff,
+            "rows": hunk_rows(diff),
+            "added": diff["added"],
+            "removed": diff["removed"],
+            "preview_ha_hash": digest(live_fp),
+            "preview_desired_hash": digest(desired_fp),
+            "current": live_fp,
+            "github": desired_fp,
+            "warnings": [],
+        })
+    return changes
+
+
+def create_lovelace_resource(ha_ws_call, url: str, resource_type: str) -> dict:
+    validate_resource_url(url)
+    if resource_type not in ALLOWED_RESOURCE_TYPES:
+        raise ValueError(f"Unsupported Lovelace resource type: {resource_type}")
+    result = ha_ws_call(
+        "lovelace/resources/create",
+        url=url,
+        res_type=resource_type,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Resource create for {url} returned an invalid result.")
+    return result
+
+
+def delete_lovelace_resource(ha_ws_call, resource_id: str) -> None:
+    if not isinstance(resource_id, str) or not resource_id:
+        raise ValueError("Lovelace resource delete requires a resource_id.")
+    ha_ws_call("lovelace/resources/delete", resource_id=resource_id)
+
+
+def rollback_created_resources(ha_ws_call, created_ids: list[str]) -> None:
+    for resource_id in reversed(created_ids):
+        delete_lovelace_resource(ha_ws_call, resource_id)
+
+
+def _created_resource_id(created: dict, matches: list[dict]) -> str | None:
+    resource_id = created.get("id")
+    if isinstance(resource_id, str) and resource_id:
+        return resource_id
+    if len(matches) == 1:
+        fallback = matches[0].get("id")
+        if isinstance(fallback, str) and fallback:
+            return fallback
+    return None
+
+
+def apply_declared_resources(
+    selected: list[str],
+    previews_ha: dict,
+    previews_desired: dict,
+    policy: ManagedPolicy,
+    ha_ws_call,
+):
+    """Create missing declared Lovelace resources. Idempotent for matching URLs."""
+    results = []
+    created_ids: list[str] = []
+    spec_map = {spec.url: spec for spec in policy.resources}
+    live = list_lovelace_resources(ha_ws_call)
+    try:
+        for url in selected:
+            spec = spec_map.get(url)
+            if spec is None:
+                raise RuntimeError(f"{url}: not in declared resources.")
+            matches = find_matching_lovelace_resources(live, url)
+            status, _css, _selectable, _reason = classify_resource(spec, matches)
+            live_fp = resource_live_fingerprint(spec, matches)
+            desired_fp = resource_desired_fingerprint(spec)
+            if (
+                url not in previews_ha
+                or url not in previews_desired
+                or not matches_preview(live_fp, previews_ha[url])
+                or not matches_preview(desired_fp, previews_desired[url])
+            ):
+                raise RuntimeError(
+                    f"{url}: HA resource changed since preview. Refresh and review before Apply."
+                )
+            if status == RESOURCE_OK_STATUS:
+                results.append({
+                    "ok": True,
+                    "message": f"{url}: already present.",
+                })
+                continue
+            if status != RESOURCE_CREATE_STATUS:
+                raise RuntimeError(
+                    f"{url}: blocked by fresh conflict-check ({status})."
+                )
+            created = create_lovelace_resource(ha_ws_call, spec.url, spec.type)
+            resource_id = created.get("id") if isinstance(created.get("id"), str) else None
+            if resource_id:
+                created_ids.append(resource_id)
+            live = list_lovelace_resources(ha_ws_call)
+            matches = find_matching_lovelace_resources(live, url)
+            resource_id = _created_resource_id(created, matches)
+            if not resource_id:
+                raise RuntimeError(f"{url}: create did not return a resource_id.")
+            if resource_id not in created_ids:
+                created_ids.append(resource_id)
+            if (
+                len(matches) != 1
+                or live_resource_type(matches[0]) != spec.type
+                or not resource_urls_match(matches[0].get("url") or "", spec.url)
+            ):
+                raise RuntimeError(f"{url}: create returned, but read-back verification failed.")
+            results.append({
+                "ok": True,
+                "message": f"{url}: Resource created and verified.",
+            })
+    except Exception as error:
+        try:
+            rollback_created_resources(ha_ws_call, created_ids)
+        except Exception as rollback_error:
+            results.append({
+                "ok": False,
+                "message": (
+                    f"Resource Apply failed ({error}); rollback also failed "
+                    f"({rollback_error})."
+                ),
+            })
+            return results, []
+        created_ids = []
+        results.append({
+            "ok": False,
+            "message": f"Resource Apply failed and rolled back: {error}",
+        })
+    return results, created_ids
 
 
 def apply_frontend_cache_bust(ha_ws_call, entry: ManagedEntry, content_sha256: str) -> dict:

@@ -10,8 +10,11 @@ from websocket import create_connection
 
 from dashboard_logic import (
     APPLYABLE_STATUSES,
+    CREATE_STATUS,
     MISSING_BASE_STATUS,
+    classify_missing_ha,
     classify_with_provenance,
+    dashboard_registration_payload,
     digest,
     is_ephemeral_dashboard,
     matches_preview,
@@ -46,12 +49,15 @@ from deployment_provenance import (
     save_store,
 )
 from managed_files import (
+    apply_declared_resources,
     apply_managed_files,
     collect_managed_changes,
+    collect_resource_changes,
     discover_managed_entries,
     initialize_missing_bases,
     load_policy,
     record_last_apply,
+    rollback_created_resources,
     validate_policy_path,
 )
 from review_warnings import format_scan_warnings
@@ -72,6 +78,7 @@ IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
 MAX_DASHBOARD_SELECTED = 20
 MAX_MANAGED_SELECTED = 50
+MAX_RESOURCE_SELECTED = 20
 
 from security import unsafe_reason
 
@@ -251,6 +258,9 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% if managed_policy_error %}
 <div class="card error"><strong>Managed files policy error:</strong> {{ managed_policy_error }}</div>
 {% endif %}
+{% if resource_error %}
+<div class="card error"><strong>Lovelace resources:</strong> {{ resource_error }}</div>
+{% endif %}
 
 {% for result in results or [] %}
 <div class="result {% if not result.ok %}bad{% endif %}">{{ result.message }}</div>
@@ -396,6 +406,26 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </section>
 {%- endmacro %}
 
+{% macro resource_card(change) -%}
+<section class="card" id="{{ change.anchor }}">
+  <div class="change-head">
+    {% if change.selectable %}
+    <input type="checkbox" name="resource_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
+    <input type="hidden" name="resource_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+    <input type="hidden" name="resource_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
+    {% endif %}
+    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
+    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
+  </div>
+  <div class="small">Lovelace resource · type <code>{{ change.resource_type }}</code> · review {{ git_source.short_sha if git_source else '-' }}</div>
+  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
+  <details {% if change.status != 'OK' %}open{% endif %}>
+    <summary>Review changes</summary>
+    {{ render_diff(change)|safe }}
+  </details>
+</section>
+{%- endmacro %}
+
 <form id="apply-form" method="post" action="apply">
 {% if git_source %}
 <input type="hidden" name="source" value="{{ git_source.source_ref if git_source.source_kind == 'branch' else 'main' }}">
@@ -404,7 +434,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% endif %}
 <input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">
 {% endif %}
-{% if not changes and not managed_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code> or managed files listed in Import policy.</p></div>{% endif %}
+{% if not changes and not managed_changes and not resource_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code>, managed files listed in Import policy, or declared Lovelace resources.</p></div>{% endif %}
 {% if file_summary.count %}
 <nav class="card files-changed" aria-label="Changed files">
   <h2>Changed files</h2>
@@ -433,7 +463,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 {% for change in changed_managed %}{{ managed_card(change)|safe }}{% endfor %}
 {% endif %}
 
-{% if unchanged_dashboards or unchanged_managed %}
+{% if changed_resources %}
+<h2>Lovelace resources</h2>
+<p class="small">Declared in Import <code>managed_files.yaml</code>. Apply creates a missing resource; a type mismatch stays a conflict.</p>
+{% for change in changed_resources %}{{ resource_card(change)|safe }}{% endfor %}
+{% endif %}
+
+{% if unchanged_dashboards or unchanged_managed or unchanged_resources %}
 <details class="unchanged-files">
   <summary>Unchanged files ({{ unchanged_count }})</summary>
   {% if unchanged_dashboards %}<h2>Dashboards</h2>{% endif %}
@@ -441,6 +477,10 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   {% if unchanged_managed %}
   <h2>Managed files</h2>
   {% for change in unchanged_managed %}{{ managed_card(change)|safe }}{% endfor %}
+  {% endif %}
+  {% if unchanged_resources %}
+  <h2>Lovelace resources</h2>
+  {% for change in unchanged_resources %}{{ resource_card(change)|safe }}{% endfor %}
   {% endif %}
 </details>
 {% endif %}
@@ -505,9 +545,9 @@ if (form) {
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (form.dataset.submitting === 'true' || pageIsBusy()) return;
-    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked');
+    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked, input[name="resource_selected"]:checked');
     if (!selected.length) {
-      window.alert('Select at least one dashboard or managed file ready to apply.');
+      window.alert('Select at least one dashboard, managed file, or Lovelace resource ready to apply.');
       return;
     }
     form.dataset.submitting = 'true';
@@ -651,13 +691,68 @@ def ha_ws_call(message_type, **payload):
         websocket.close()
 
 
+MISSING_DASHBOARD_MARKERS = (
+    "unknown config specified",
+    "no config found",
+)
+
+
 def ha_dashboard_config(relative):
     url_path = dashboard_url_path(relative)
     payload = {"url_path": url_path} if url_path else {}
-    result = ha_ws_call("lovelace/config", **payload)
+    try:
+        result = ha_ws_call("lovelace/config", **payload)
+    except RuntimeError as error:
+        message = str(error).lower()
+        if any(marker in message for marker in MISSING_DASHBOARD_MARKERS):
+            return None
+        raise
     if not isinstance(result, dict):
         raise RuntimeError(f"Dashboard {url_path or 'default'} returned invalid config.")
     return result
+
+
+def ha_registered_url_paths():
+    result = ha_ws_call("lovelace/dashboards/list")
+    paths = set()
+    if not isinstance(result, list):
+        raise RuntimeError("Dashboard list returned invalid result.")
+    for item in result:
+        if isinstance(item, dict) and isinstance(item.get("url_path"), str):
+            paths.add(item["url_path"])
+    return paths
+
+
+def create_dashboard(relative, desired):
+    url_path = dashboard_url_path(relative)
+    result = ha_ws_call(
+        "lovelace/dashboards/create",
+        **dashboard_registration_payload(url_path, desired),
+    )
+    if not isinstance(result, dict) or not result.get("id"):
+        raise RuntimeError(
+            f"Dashboard create for {url_path} did not return an id."
+        )
+    return result
+
+
+def delete_dashboard(dashboard_id):
+    ha_ws_call("lovelace/dashboards/delete", dashboard_id=dashboard_id)
+
+
+def restore_dashboard(relative, *, created_id, before):
+    """Undo a just-attempted Apply. Delete only a dashboard created in this Apply."""
+    if created_id:
+        delete_dashboard(created_id)
+        return ha_dashboard_config(relative) is None
+    if before is None:
+        url_path = dashboard_url_path(relative)
+        payload = {"url_path": url_path} if url_path else {}
+        ha_ws_call("lovelace/config/delete", **payload)
+        return ha_dashboard_config(relative) is None
+    save_dashboard(relative, before)
+    restored = ha_dashboard_config(relative)
+    return restored is not None and digest(restored) == digest(before)
 
 
 def save_dashboard(relative, desired):
@@ -746,6 +841,7 @@ def collect_changes(commit_sha="", revision=None):
     store = live_provenance_store()
     pending_adopt = []
     changes = []
+    registered_paths = None
     if not root.exists():
         return changes
     for github_path in sorted(root.glob("*.json")):
@@ -758,13 +854,22 @@ def collect_changes(commit_sha="", revision=None):
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
         live_entry = store.dashboards.get(relative)
-        status, css, selectable, reason, should_adopt = classify_with_provenance(
-            github,
-            current,
-            base,
-            reviewing_canonical=reviewing_canonical,
-            provenance=live_entry,
-        )
+        if current is None:
+            if registered_paths is None:
+                registered_paths = ha_registered_url_paths()
+            url_path = dashboard_url_path(relative)
+            status, css, selectable, reason = classify_missing_ha(
+                url_path, registered=url_path in registered_paths
+            )
+            should_adopt = False
+        else:
+            status, css, selectable, reason, should_adopt = classify_with_provenance(
+                github,
+                current,
+                base,
+                reviewing_canonical=reviewing_canonical,
+                provenance=live_entry,
+            )
         if should_adopt and revision is not None:
             pending_adopt.append((relative, digest(current)))
         warnings = format_scan_warnings(github, "\n".join(pretty_lines(github)))
@@ -864,8 +969,10 @@ def stale_source_message(revision: SourceRevision) -> str:
 
 def render_review(results=None, *, source=None, pin_sha=None):
     error = None
+    resource_error = None
     changes = []
     managed_changes = []
+    resource_changes = []
     revision = source
     with REPO_LOCK:
         try:
@@ -899,6 +1006,13 @@ def render_review(results=None, *, source=None, pin_sha=None):
                         None if live_entry is None else live_entry.short_sha()
                     )
                 managed_changes = [public_managed_change(item) for item in managed_changes]
+            if MANAGED_POLICY is not None and not MANAGED_POLICY_ERROR:
+                try:
+                    resource_changes = collect_resource_changes(
+                        MANAGED_POLICY, ha_ws_call
+                    )
+                except Exception as exception:
+                    resource_error = str(exception)
         except InvalidSourceRef as exception:
             error = str(exception)
             revision = revision if isinstance(revision, SourceRevision) else SourceRevision.fallback()
@@ -911,21 +1025,29 @@ def render_review(results=None, *, source=None, pin_sha=None):
         and (
             any(change["selectable"] for change in changes)
             or any(change["selectable"] for change in managed_changes)
+            or any(change["selectable"] for change in resource_changes)
         )
     )
     return render_template_string(
         TEMPLATE,
         changes=changes,
         managed_changes=managed_changes,
+        resource_changes=resource_changes,
         changed_dashboards=[item for item in changes if is_changed_review(item)],
         unchanged_dashboards=[item for item in changes if not is_changed_review(item)],
         changed_managed=[item for item in managed_changes if is_changed_review(item)],
         unchanged_managed=[item for item in managed_changes if not is_changed_review(item)],
+        changed_resources=[item for item in resource_changes if is_changed_review(item)],
+        unchanged_resources=[item for item in resource_changes if not is_changed_review(item)],
         unchanged_count=sum(
-            1 for item in (*changes, *managed_changes) if not is_changed_review(item)
+            1 for item in (*changes, *managed_changes, *resource_changes)
+            if not is_changed_review(item)
         ),
-        file_summary=summarize_changed_files(changes, managed_changes),
+        file_summary=summarize_changed_files(
+            changes, managed_changes, resource_changes
+        ),
         managed_policy_error=MANAGED_POLICY_ERROR,
+        resource_error=resource_error,
         error=error,
         commit=revision.short_sha if revision else "-",
         git_source=revision,
@@ -950,7 +1072,8 @@ def index():
 def apply_selected():
     selected = request.form.getlist("selected")
     managed_selected = request.form.getlist("managed_selected")
-    if not selected and not managed_selected:
+    resource_selected = request.form.getlist("resource_selected")
+    if not selected and not managed_selected and not resource_selected:
         return render_review([{"ok": False, "message": "No READY item selected."}])
     if (
         len(selected) > MAX_DASHBOARD_SELECTED
@@ -964,10 +1087,20 @@ def apply_selected():
         or len(set(managed_selected)) != len(managed_selected)
     ):
         abort(400)
+    if (
+        len(resource_selected) > MAX_RESOURCE_SELECTED
+        or len(set(resource_selected)) != len(resource_selected)
+    ):
+        abort(400)
     try:
         for value in managed_selected:
             validate_policy_path(value)
     except ValueError:
+        abort(400)
+    allowed_resources = {
+        spec.url for spec in (MANAGED_POLICY.resources if MANAGED_POLICY else ())
+    }
+    if any(value not in allowed_resources for value in resource_selected):
         abort(400)
 
     reviewed_sha = (request.form.get("reviewed_sha") or "").strip()
@@ -978,6 +1111,8 @@ def apply_selected():
     desired_previews = {}
     managed_previews = {}
     managed_desired = {}
+    resource_previews = {}
+    resource_desired = {}
     try:
         requested_ref, _kind = requested_source_from_request()
         if selected:
@@ -991,6 +1126,18 @@ def apply_selected():
             if any(
                 relative not in managed_previews or relative not in managed_desired
                 for relative in managed_selected
+            ):
+                abort(400)
+        if resource_selected:
+            resource_previews = parse_preview_hashes(
+                request.form.getlist("resource_preview_hash")
+            )
+            resource_desired = parse_preview_hashes(
+                request.form.getlist("resource_desired_hash")
+            )
+            if any(
+                url not in resource_previews or url not in resource_desired
+                for url in resource_selected
             ):
                 abort(400)
     except InvalidSourceRef:
@@ -1026,92 +1173,8 @@ def apply_selected():
             if any(value not in allowed_managed for value in managed_selected):
                 abort(400)
             store = live_provenance_store()
-            if selected:
-                fresh = {
-                    change["relative"]: change
-                    for change in collect_changes(revision=revision)
-                }
-                store = live_provenance_store()
-                for relative in selected:
-                    change = fresh.get(relative)
-                    if change and (not matches_preview(change["current"], previews[relative])
-                                   or not matches_preview(change["github"], desired_previews[relative])):
-                        results.append({
-                            "ok": False,
-                            "message": (
-                                f"{relative}: HA or Git desired changed since preview. "
-                                "Refresh and review the new diff before Apply."
-                            ),
-                        })
-                        continue
-                    if not change or change["status"] not in APPLYABLE_STATUSES:
-                        status = change["status"] if change else "missing"
-                        results.append({
-                            "ok": False,
-                            "message": f"{relative}: blocked by fresh conflict-check ({status}).",
-                        })
-                        continue
-                    if not matches_preview(ha_dashboard_config(relative), previews[relative]):
-                        results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
-                        continue
-                    before = change["current"]
-                    save_dashboard(relative, change["github"])
-                    verified = ha_dashboard_config(relative)
-                    if digest(verified) != digest(change["github"]):
-                        results.append({
-                            "ok": False,
-                            "message": f"{relative}: save returned, but read-back verification failed.",
-                        })
-                        continue
-                    try:
-                        next_store = record_artifacts(
-                            store,
-                            source_ref=revision.source_ref,
-                            source_kind=revision.source_kind,
-                            commit_sha=revision.commit_sha,
-                            dashboards={relative: desired_previews[relative]},
-                        )
-                        persist_provenance(
-                            next_store,
-                            required_dashboard=relative,
-                            required_hash=desired_previews[relative],
-                        )
-                    except (OSError, InvalidProvenance) as persist_error:
-                        rolled_back = False
-                        try:
-                            save_dashboard(relative, before)
-                            restored = ha_dashboard_config(relative)
-                            rolled_back = digest(restored) == digest(before)
-                        except Exception:
-                            rolled_back = False
-                        if not rolled_back:
-                            try:
-                                arm_fail_closed_guard(shared_path=SHARED_STATE_PATH)
-                            except OSError:
-                                pass
-                            results.append({
-                                "ok": False,
-                                "message": (
-                                    f"{relative}: LIVE was written but provenance could not "
-                                    "be persisted and rollback failed. Dashboard export to "
-                                    "main is blocked until provenance is restored."
-                                ),
-                            })
-                        else:
-                            results.append({
-                                "ok": False,
-                                "message": (
-                                    f"{relative}: provenance persist failed; LIVE rolled back. "
-                                    f"Apply FAILED ({persist_error})."
-                                ),
-                            })
-                        continue
-                    store = next_store
-                    results.append({
-                        "ok": True,
-                        "message": f"{relative}: Applied and verified.",
-                    })
-                    applied.append(relative)
+            created_resource_ids = []
+            resource_failed = False
             if managed_selected:
                 token = os.environ.get("SUPERVISOR_TOKEN")
                 if not token:
@@ -1149,6 +1212,150 @@ def apply_selected():
                         "message": (
                             "Managed files were applied, but provenance metadata "
                             "could not be stored."
+                        ),
+                    })
+            if resource_selected:
+                resource_results, created_resource_ids = apply_declared_resources(
+                    resource_selected,
+                    resource_previews,
+                    resource_desired,
+                    MANAGED_POLICY,
+                    ha_ws_call,
+                )
+                results.extend(resource_results)
+                resource_failed = any(not item.get("ok") for item in resource_results)
+                if resource_failed:
+                    created_resource_ids = []
+            if selected and not resource_failed:
+                fresh = {
+                    change["relative"]: change
+                    for change in collect_changes(revision=revision)
+                }
+                store = live_provenance_store()
+                for relative in selected:
+                    change = fresh.get(relative)
+                    if change and (not matches_preview(change["current"], previews[relative])
+                                   or not matches_preview(change["github"], desired_previews[relative])):
+                        results.append({
+                            "ok": False,
+                            "message": (
+                                f"{relative}: HA or Git desired changed since preview. "
+                                "Refresh and review the new diff before Apply."
+                            ),
+                        })
+                        continue
+                    if not change or change["status"] not in APPLYABLE_STATUSES:
+                        status = change["status"] if change else "missing"
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: blocked by fresh conflict-check ({status}).",
+                        })
+                        continue
+                    if not matches_preview(ha_dashboard_config(relative), previews[relative]):
+                        results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
+                        continue
+                    before = change["current"]
+                    created_id = None
+                    try:
+                        if change["status"] == CREATE_STATUS:
+                            created_id = create_dashboard(relative, change["github"])["id"]
+                        save_dashboard(relative, change["github"])
+                        verified = ha_dashboard_config(relative)
+                    except Exception as apply_error:
+                        if created_id:
+                            try:
+                                restore_dashboard(
+                                    relative, created_id=created_id, before=before
+                                )
+                            except Exception:
+                                pass
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: Apply failed: {apply_error}",
+                        })
+                        continue
+                    if verified is None or digest(verified) != digest(change["github"]):
+                        try:
+                            restore_dashboard(
+                                relative, created_id=created_id, before=before
+                            )
+                        except Exception:
+                            pass
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: save returned, but read-back verification failed.",
+                        })
+                        continue
+                    try:
+                        next_store = record_artifacts(
+                            store,
+                            source_ref=revision.source_ref,
+                            source_kind=revision.source_kind,
+                            commit_sha=revision.commit_sha,
+                            dashboards={relative: desired_previews[relative]},
+                        )
+                        persist_provenance(
+                            next_store,
+                            required_dashboard=relative,
+                            required_hash=desired_previews[relative],
+                        )
+                    except (OSError, InvalidProvenance) as persist_error:
+                        rolled_back = False
+                        try:
+                            rolled_back = restore_dashboard(
+                                relative, created_id=created_id, before=before
+                            )
+                        except Exception:
+                            rolled_back = False
+                        if not rolled_back:
+                            try:
+                                arm_fail_closed_guard(shared_path=SHARED_STATE_PATH)
+                            except OSError:
+                                pass
+                            results.append({
+                                "ok": False,
+                                "message": (
+                                    f"{relative}: LIVE was written but provenance could not "
+                                    "be persisted and rollback failed. Dashboard export to "
+                                    "main is blocked until provenance is restored."
+                                ),
+                            })
+                        else:
+                            results.append({
+                                "ok": False,
+                                "message": (
+                                    f"{relative}: provenance persist failed; LIVE rolled back. "
+                                    f"Apply FAILED ({persist_error})."
+                                ),
+                            })
+                        continue
+                    store = next_store
+                    applied_label = (
+                        "Created, applied and verified."
+                        if created_id
+                        else "Applied and verified."
+                    )
+                    results.append({
+                        "ok": True,
+                        "message": f"{relative}: {applied_label}",
+                    })
+                    applied.append(relative)
+            if created_resource_ids and selected and not applied:
+                try:
+                    rollback_created_resources(ha_ws_call, created_resource_ids)
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            "Created Lovelace resources were rolled back after "
+                            "dashboard Apply failed."
+                        ),
+                    })
+                except Exception as rollback_error:
+                    results.append({
+                        "ok": False,
+                        "message": (
+                            "Dashboard Apply failed, and rolling back created "
+                            f"Lovelace resources also failed: {rollback_error}"
                         ),
                     })
             if applied or managed_applied:
