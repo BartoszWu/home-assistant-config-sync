@@ -1,3 +1,4 @@
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -292,6 +293,10 @@ class StagingAndApplyTests(unittest.TestCase):
         self.assertEqual(policy.prefixes[0].prefix, "www/dashboard/")
         self.assertEqual(policy.prefixes[0].extensions, (".js", ".mjs"))
         self.assertEqual(policy.prefixes[0].profile, "frontend_module")
+        self.assertIsNone(policy.prefixes[0].cache_bust)
+        card = next(entry for entry in policy.exact if entry.path == "www/temperature-card.mjs")
+        self.assertEqual(card.resource_url, "/local/temperature-card.mjs")
+        self.assertEqual(card.cache_bust, "content_hash")
         self.assertFalse(
             any(rule.prefix.startswith("custom_templates/") for rule in policy.prefixes)
         )
@@ -857,6 +862,262 @@ class PrefixApplyTests(unittest.TestCase):
         hero = next(item for item in changes if item["relative"].endswith("home-hero.mjs"))
         self.assertTrue(hero["selectable"])
         self.assertTrue(any("shared/utils.mjs" in (warning.get("reason") or "") for warning in hero["warnings"]))
+
+
+
+class FakeLovelace:
+    def __init__(self, resources, *, fail_list=False, fail_update=False):
+        self.resources = [dict(item) for item in resources]
+        self.fail_list = fail_list
+        self.fail_update = fail_update
+        self.calls = []
+
+    def __call__(self, message_type, **payload):
+        self.calls.append((message_type, payload))
+        if message_type == "call_service":
+            return {}
+        if message_type == "lovelace/resources/list":
+            if self.fail_list:
+                raise RuntimeError("websocket down")
+            return [dict(item) for item in self.resources]
+        if message_type == "lovelace/resources/update":
+            if self.fail_update:
+                raise RuntimeError("websocket down")
+            resource_id = payload["resource_id"]
+            if "res_type" in payload:
+                raise AssertionError("update must not send res_type")
+            for item in self.resources:
+                if item["id"] == resource_id:
+                    item["url"] = payload["url"]
+                    return dict(item)
+            raise RuntimeError("resource not found")
+        raise AssertionError(f"unexpected WebSocket command: {message_type}")
+
+
+class FrontendCacheBustTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "www").mkdir()
+        (self.root / "packages").mkdir()
+        self.workdir = self.root / "git"
+        (self.workdir / "www").mkdir(parents=True)
+        (self.workdir / "packages").mkdir(parents=True)
+        self.bases = self.root / "bases.json"
+        self.backup = self.root / "backups"
+        self.journal = self.root / "journal.json"
+        self.patches = [
+            mock.patch.object(mf, "BASES_PATH", self.bases),
+            mock.patch.object(mf, "BACKUP_ROOT", self.backup),
+            mock.patch.object(mf, "JOURNAL_PATH", self.journal),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in self.patches:
+            patcher.stop()
+        self.tmp.cleanup()
+
+    def test_url_normalization_ignores_query_string(self):
+        base = "/local/temperature-card.mjs"
+        for url in (base, f"{base}?v=5", f"{base}?v=abcdef"):
+            self.assertEqual(mf.resource_url_path(url), base)
+            self.assertTrue(mf.resource_urls_match(url, base))
+
+    def test_same_content_keeps_query_changed_content_differs(self):
+        abc = hashlib.sha256(b"abc").hexdigest()
+        abcd = hashlib.sha256(b"abcd").hexdigest()
+        self.assertEqual(mf.cache_bust_token(abc), abc[:8])
+        self.assertEqual(mf.cache_bust_token(hashlib.sha256(b"abc").hexdigest()), abc[:8])
+        self.assertNotEqual(abc[:8], abcd[:8])
+        self.assertEqual(
+            mf.cache_busted_resource_url("/local/temperature-card.mjs", abc),
+            f"/local/temperature-card.mjs?v={abc[:8]}",
+        )
+        self.assertNotEqual(
+            mf.cache_busted_resource_url("/local/temperature-card.mjs", abc),
+            mf.cache_busted_resource_url("/local/temperature-card.mjs", abcd),
+        )
+
+    def test_policy_rejects_cache_bust_on_non_frontend(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as handle:
+            handle.write(
+                "ha_config_root: /homeassistant\n"
+                "managed_files:\n"
+                "  - path: packages/temperatura.yaml\n"
+                "    profile: package\n"
+                "    cache_bust: content_hash\n"
+            )
+            policy_path = Path(handle.name)
+        try:
+            with self.assertRaises(RuntimeError):
+                mf.load_policy(policy_path)
+        finally:
+            policy_path.unlink()
+
+    def _prepare_frontend(self, live="OLD-MODULE\n", desired="NEW-MODULE\n"):
+        canonical = self.root / "www" / "temperature-card.mjs"
+        git = self.workdir / "www" / "temperature-card.mjs"
+        canonical.write_text(live, encoding="utf-8")
+        git.write_text(desired, encoding="utf-8")
+        live_hash = mf.file_digest(canonical.read_bytes())
+        git_hash = mf.file_digest(git.read_bytes())
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "www/temperature-card.mjs", live_hash)
+        mf.save_bases(bases)
+        entry = mf.ManagedEntry(
+            "www/temperature-card.mjs",
+            "frontend_module",
+            resource_url="/local/temperature-card.mjs",
+            cache_bust="content_hash",
+        )
+        return canonical, live_hash, git_hash, entry
+
+    def _apply(self, live_hash, git_hash, entry, ha_ws_call):
+        return mf.apply_managed_files(
+            ["www/temperature-card.mjs"],
+            {"www/temperature-card.mjs": live_hash},
+            {"www/temperature-card.mjs": git_hash},
+            self.workdir,
+            self.root,
+            [entry],
+            unsafe_none,
+            ha_ws_call,
+            "token",
+        )
+
+    def test_noop_when_resource_already_has_content_hash(self):
+        canonical, live_hash, git_hash, entry = self._prepare_frontend()
+        desired = mf.cache_busted_resource_url(entry.resource_url, git_hash)
+        ws = FakeLovelace([
+            {"id": "res-1", "type": "module", "url": desired},
+        ])
+        results, applied = self._apply(live_hash, git_hash, entry, ws)
+        self.assertEqual(applied, ["www/temperature-card.mjs"])
+        self.assertEqual(canonical.read_text(encoding="utf-8"), "NEW-MODULE\n")
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(results[0]["cache_bust"]["status"], "skipped")
+        self.assertEqual(results[0]["cache_bust"]["reason"], "content hash unchanged")
+        self.assertIn("resource update: skipped", results[0]["message"])
+        self.assertEqual(
+            [kind for kind, _ in ws.calls],
+            ["lovelace/resources/list"],
+        )
+
+    def test_update_rewrites_url_and_keeps_module_type(self):
+        canonical, live_hash, git_hash, entry = self._prepare_frontend()
+        ws = FakeLovelace([
+            {"id": "res-1", "type": "module", "url": "/local/temperature-card.mjs?v=5"},
+        ])
+        results, applied = self._apply(live_hash, git_hash, entry, ws)
+        desired = mf.cache_busted_resource_url(entry.resource_url, git_hash)
+        self.assertEqual(applied, ["www/temperature-card.mjs"])
+        self.assertEqual(canonical.read_text(encoding="utf-8"), "NEW-MODULE\n")
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(results[0]["cache_bust"]["status"], "updated")
+        self.assertEqual(results[0]["cache_bust"]["resource_id"], "res-1")
+        self.assertEqual(results[0]["cache_bust"]["url"], desired)
+        self.assertEqual(
+            ws.calls,
+            [
+                ("lovelace/resources/list", {}),
+                ("lovelace/resources/update", {"resource_id": "res-1", "url": desired}),
+            ],
+        )
+        self.assertEqual(ws.resources[0]["type"], "module")
+        self.assertEqual(ws.resources[0]["url"], desired)
+
+    def test_missing_resource_keeps_deploy_and_warns(self):
+        canonical, live_hash, git_hash, entry = self._prepare_frontend()
+        ws = FakeLovelace([
+            {"id": "other", "type": "module", "url": "/local/other-card.mjs"},
+        ])
+        results, applied = self._apply(live_hash, git_hash, entry, ws)
+        self.assertEqual(applied, ["www/temperature-card.mjs"])
+        self.assertEqual(canonical.read_text(encoding="utf-8"), "NEW-MODULE\n")
+        self.assertFalse(results[0]["ok"])
+        self.assertEqual(results[0]["cache_bust"]["status"], "missing_resource")
+        self.assertIn("matching Lovelace resource was not found", results[0]["message"])
+        self.assertEqual([kind for kind, _ in ws.calls], ["lovelace/resources/list"])
+        self.assertEqual(
+            mf.base_hash_for(mf.load_bases(), "www/temperature-card.mjs"),
+            git_hash,
+        )
+
+    def test_websocket_failure_does_not_roll_back_file(self):
+        canonical, live_hash, git_hash, entry = self._prepare_frontend()
+        ws = FakeLovelace(
+            [{"id": "res-1", "type": "module", "url": "/local/temperature-card.mjs?v=5"}],
+            fail_update=True,
+        )
+        results, applied = self._apply(live_hash, git_hash, entry, ws)
+        self.assertEqual(applied, ["www/temperature-card.mjs"])
+        self.assertEqual(canonical.read_text(encoding="utf-8"), "NEW-MODULE\n")
+        self.assertFalse(results[0]["ok"])
+        self.assertEqual(results[0]["cache_bust"]["status"], "error")
+        self.assertIn("cache-buster was not updated", results[0]["message"])
+        self.assertIn("websocket down", results[0]["message"])
+        self.assertNotIn("rolled back", results[0]["message"].lower())
+        self.assertEqual(
+            mf.base_hash_for(mf.load_bases(), "www/temperature-card.mjs"),
+            git_hash,
+        )
+
+    def test_non_frontend_profile_does_not_touch_lovelace_resources(self):
+        live = self.root / "packages" / "temperatura.yaml"
+        git = self.workdir / "packages" / "temperatura.yaml"
+        live.write_text("old: 1\n", encoding="utf-8")
+        git.write_text("new: 2\n", encoding="utf-8")
+        live_hash = mf.file_digest(live.read_bytes())
+        git_hash = mf.file_digest(git.read_bytes())
+        bases = {"schema_version": 1, "files": {}}
+        mf.set_base_hash(bases, "packages/temperatura.yaml", live_hash)
+        mf.save_bases(bases)
+        ws = FakeLovelace([])
+        with mock.patch.object(mf, "ha_check_config", return_value={"result": "valid", "errors": None}):
+            results, applied = mf.apply_managed_files(
+                ["packages/temperatura.yaml"],
+                {"packages/temperatura.yaml": live_hash},
+                {"packages/temperatura.yaml": git_hash},
+                self.workdir,
+                self.root,
+                [mf.ManagedEntry("packages/temperatura.yaml", "package")],
+                unsafe_none,
+                ws,
+                "token",
+            )
+        self.assertTrue(all(item["ok"] for item in results))
+        self.assertEqual(applied, ["packages/temperatura.yaml"])
+        self.assertEqual(
+            ws.calls,
+            [("call_service", {"domain": "homeassistant", "service": "reload_all"})],
+        )
+        self.assertNotIn("cache_bust", results[0])
+
+    def test_helper_skip_and_update_without_apply(self):
+        digest = hashlib.sha256(b"bundle").hexdigest()
+        desired = f"/local/temperature-card.mjs?v={digest[:8]}"
+        entry = mf.ManagedEntry(
+            "www/temperature-card.mjs",
+            "frontend_module",
+            resource_url="/local/temperature-card.mjs",
+            cache_bust="content_hash",
+        )
+        skip_ws = FakeLovelace([{"id": "res-1", "type": "module", "url": desired}])
+        skipped = mf.apply_frontend_cache_bust(skip_ws, entry, digest)
+        self.assertEqual(skipped["status"], "skipped")
+        self.assertEqual(skipped["reason"], "content hash unchanged")
+        self.assertEqual([kind for kind, _ in skip_ws.calls], ["lovelace/resources/list"])
+
+        update_ws = FakeLovelace(
+            [{"id": "res-1", "type": "module", "url": "/local/temperature-card.mjs?v=5"}]
+        )
+        updated = mf.apply_frontend_cache_bust(update_ws, entry, digest)
+        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(updated["url"], desired)
+        self.assertEqual(updated["resource_id"], "res-1")
+        self.assertEqual(update_ws.resources[0]["type"], "module")
 
 
 if __name__ == "__main__":

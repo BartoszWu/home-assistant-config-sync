@@ -14,8 +14,13 @@ managed_files:
   - path: packages/temperatura.yaml
     profile: package
 
+  # After a verified Apply, Import updates the matching Lovelace resource URL
+  # to /local/...?v=<content-hash>. It does not write .storage and does not
+  # create a missing resource.
   - path: www/temperature-card.mjs
     profile: frontend_module
+    resource_url: /local/temperature-card.mjs
+    cache_bust: content_hash
 
   # Exact file only. Do not wildcard custom_templates/.
   # Addon path /homeassistant maps to HA /config.
