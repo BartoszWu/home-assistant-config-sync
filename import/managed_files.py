@@ -32,6 +32,10 @@ JOURNAL_PATH = Path("/data/managed-file-journal.json")
 PREVIEW_DIRNAME = ".config-sync-preview"
 STAGING_SHA_LEN = 12
 FRONTEND_PREFIX_EXTENSIONS = frozenset({".js", ".mjs"})
+CACHE_BUST_CONTENT_HASH = "content_hash"
+CACHE_BUST_MODES = frozenset({CACHE_BUST_CONTENT_HASH})
+CACHE_BUST_HASH_LEN = 8
+RESOURCE_URL_RE = re.compile(r"^/local/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.(?:js|mjs)$")
 RELATIVE_IMPORT_RE = re.compile(
     r"""(?<![A-Za-z0-9_])(?:import\s+(?:[^'"\n]+?\s+from\s+)?|export\s+[^'"\n]*?\s+from\s+)['"](\.[^'"]+)['"]"""
 )
@@ -78,6 +82,8 @@ PREFIX_RE = re.compile(
 class ManagedEntry:
     path: str
     profile: str
+    resource_url: str | None = None
+    cache_bust: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class PrefixRule:
     prefix: str
     extensions: tuple[str, ...]
     profile: str
+    cache_bust: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +153,13 @@ def load_policy(path: Path | None = None) -> ManagedPolicy:
         if relative in seen:
             raise RuntimeError(f"Duplicate managed file path: {relative}")
         seen.add(relative)
-        entries.append(ManagedEntry(path=relative, profile=profile))
+        resource_url, cache_bust = _parse_cache_bust_fields(item, profile, relative=relative)
+        entries.append(ManagedEntry(
+            path=relative,
+            profile=profile,
+            resource_url=resource_url,
+            cache_bust=cache_bust,
+        ))
     return ManagedPolicy(ha_root=Path(root), exact=tuple(entries), prefixes=tuple(prefixes))
 
 
@@ -183,7 +196,67 @@ def _parse_prefix_rule(item: dict, profile: str, seen_prefixes: set[str]) -> Pre
         if lowered not in extensions:
             extensions.append(lowered)
     seen_prefixes.add(prefix)
-    return PrefixRule(prefix=prefix, extensions=tuple(extensions), profile=profile)
+    _resource_url, cache_bust = _parse_cache_bust_fields(item, profile, prefix=True)
+    return PrefixRule(
+        prefix=prefix,
+        extensions=tuple(extensions),
+        profile=profile,
+        cache_bust=cache_bust,
+    )
+
+
+def default_resource_url(relative: str) -> str:
+    return f"/local/{www_relative(relative)}"
+
+
+def validate_resource_url(url: str) -> None:
+    if not isinstance(url, str) or not url:
+        raise ValueError("Empty Lovelace resource URL.")
+    if "\\" in url or ".." in url.split("/"):
+        raise ValueError("Path traversal is forbidden in resource_url.")
+    if "?" in url or "#" in url:
+        raise ValueError("resource_url must be a path without a query string.")
+    if not RESOURCE_URL_RE.fullmatch(url):
+        raise ValueError(f"resource_url must be a /local frontend module path: {url}")
+
+
+def _parse_cache_bust_fields(
+    item: dict,
+    profile: str,
+    *,
+    relative: str | None = None,
+    prefix: bool = False,
+) -> tuple[str | None, str | None]:
+    cache_bust = item.get("cache_bust")
+    resource_url = item.get("resource_url")
+    if cache_bust is None and resource_url is None:
+        return None, None
+    if profile != "frontend_module":
+        raise RuntimeError("cache_bust and resource_url are only valid for frontend_module.")
+    if cache_bust is not None and cache_bust not in CACHE_BUST_MODES:
+        raise RuntimeError(f"Unknown cache_bust mode: {cache_bust}")
+    if resource_url is not None:
+        if prefix:
+            raise RuntimeError(
+                "resource_url is only valid on exact path entries; "
+                "prefix rules derive /local URLs from discovered files."
+            )
+        if not isinstance(resource_url, str):
+            raise RuntimeError("resource_url must be a string.")
+        try:
+            validate_resource_url(resource_url)
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+        if relative is not None and resource_url != default_resource_url(relative):
+            raise RuntimeError(
+                f"resource_url {resource_url} does not match "
+                f"{default_resource_url(relative)} for {relative}."
+            )
+    elif cache_bust is not None and relative is not None:
+        resource_url = default_resource_url(relative)
+    if cache_bust is None:
+        raise RuntimeError("resource_url requires cache_bust.")
+    return resource_url, cache_bust
 
 
 def validate_policy_path(relative: str) -> None:
@@ -256,7 +329,13 @@ def discover_managed_entries(workdir: Path, policy: ManagedPolicy) -> list[Manag
                 if rel in seen:
                     continue
                 seen.add(rel)
-                found.append(ManagedEntry(path=rel, profile=rule.profile))
+                resource_url = default_resource_url(rel) if rule.cache_bust else None
+                found.append(ManagedEntry(
+                    path=rel,
+                    profile=rule.profile,
+                    resource_url=resource_url,
+                    cache_bust=rule.cache_bust,
+                ))
     found.sort(key=lambda entry: entry.path)
     return found
 
@@ -532,6 +611,28 @@ def www_relative(relative: str) -> str:
     return relative[len("www/"):]
 
 
+def resource_url_path(url: str) -> str:
+    """Strip query/fragment so /local/foo.mjs?v=5 matches /local/foo.mjs."""
+    if not isinstance(url, str) or not url:
+        return ""
+    return url.split("#", 1)[0].split("?", 1)[0]
+
+
+def resource_urls_match(left: str, right: str) -> bool:
+    return resource_url_path(left) == resource_url_path(right)
+
+
+def cache_bust_token(content_sha256: str) -> str:
+    if not HASH_RE.fullmatch(content_sha256):
+        raise ValueError("cache-bust token requires a SHA-256 hex digest.")
+    return content_sha256[:CACHE_BUST_HASH_LEN]
+
+
+def cache_busted_resource_url(resource_url: str, content_sha256: str) -> str:
+    validate_resource_url(resource_url)
+    return f"{resource_url}?v={cache_bust_token(content_sha256)}"
+
+
 def staging_relative(commit_sha: str, relative: str) -> str:
     return f"www/{PREVIEW_DIRNAME}/{staging_commit_dir(commit_sha)}/{www_relative(relative)}"
 
@@ -697,13 +798,159 @@ def activate_package(ha_ws_call, token: str) -> dict:
     }
 
 
-def activate_frontend_module() -> dict:
+def activate_frontend_module(*, cache_bust: str | None = None) -> dict:
+    if cache_bust == CACHE_BUST_CONTENT_HASH:
+        message = "Frontend module written. No Core reload required."
+    else:
+        message = (
+            "Frontend module written. No Core reload required; "
+            "browsers may cache /local assets."
+        )
     return {
         "ok": True,
         "activation": "static",
-        "message": "Frontend module written. No Core reload required; browsers may cache /local assets.",
+        "message": message,
         "restart_required": False,
     }
+
+
+def list_lovelace_resources(ha_ws_call) -> list:
+    result = ha_ws_call("lovelace/resources/list")
+    if not isinstance(result, list):
+        raise RuntimeError("Home Assistant returned an invalid Lovelace resource list.")
+    return result
+
+
+def find_matching_lovelace_resources(resources: list, resource_url: str) -> list[dict]:
+    matches = []
+    for item in resources:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if isinstance(url, str) and resource_urls_match(url, resource_url):
+            matches.append(item)
+    return matches
+
+
+def apply_frontend_cache_bust(ha_ws_call, entry: ManagedEntry, content_sha256: str) -> dict:
+    """Update the matching Lovelace resource URL after a verified frontend deploy.
+
+    Never creates missing resources. Failures are warnings; they must not roll
+    back the already-verified file write. lovelace.reload_resources is YAML-mode
+    only and is not called here.
+    """
+    if entry.profile != "frontend_module" or entry.cache_bust != CACHE_BUST_CONTENT_HASH:
+        return {
+            "status": "skipped",
+            "ok": True,
+            "reason": "not configured",
+            "message": "",
+        }
+    if not entry.resource_url:
+        return {
+            "status": "error",
+            "ok": False,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                "but cache_bust is configured without a resource_url."
+            ),
+        }
+    desired = cache_busted_resource_url(entry.resource_url, content_sha256)
+    try:
+        resources = list_lovelace_resources(ha_ws_call)
+    except Exception as error:
+        return {
+            "status": "error",
+            "ok": False,
+            "url": desired,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                "but the Lovelace resource cache-buster was not updated "
+                f"({error})."
+            ),
+        }
+    matches = find_matching_lovelace_resources(resources, entry.resource_url)
+    if not matches:
+        return {
+            "status": "missing_resource",
+            "ok": False,
+            "url": desired,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                "but matching Lovelace resource was not found."
+            ),
+        }
+    if len(matches) > 1:
+        return {
+            "status": "ambiguous",
+            "ok": False,
+            "url": desired,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                f"but {len(matches)} Lovelace resources match {entry.resource_url}; "
+                "refusing to guess resource_id."
+            ),
+        }
+    resource = matches[0]
+    resource_id = resource.get("id")
+    if not isinstance(resource_id, str) or not resource_id:
+        return {
+            "status": "error",
+            "ok": False,
+            "url": desired,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                "but the matching Lovelace resource has no id."
+            ),
+        }
+    current_url = resource.get("url") if isinstance(resource.get("url"), str) else ""
+    if current_url == desired:
+        return {
+            "status": "skipped",
+            "ok": True,
+            "reason": "content hash unchanged",
+            "resource_id": resource_id,
+            "url": desired,
+            "message": "resource update: skipped; reason: content hash unchanged",
+        }
+    try:
+        ha_ws_call("lovelace/resources/update", resource_id=resource_id, url=desired)
+    except Exception as error:
+        return {
+            "status": "error",
+            "ok": False,
+            "resource_id": resource_id,
+            "url": desired,
+            "message": (
+                "WARNING: frontend module deployed successfully, "
+                "but the Lovelace resource cache-buster was not updated "
+                f"({error})."
+            ),
+        }
+    return {
+        "status": "updated",
+        "ok": True,
+        "resource_id": resource_id,
+        "url": desired,
+        "previous_url": current_url,
+        "message": (
+            f"Lovelace resource URL updated to {desired}. "
+            "An already open dashboard may still require a normal page refresh."
+        ),
+    }
+
+
+def _merge_cache_bust_result(result: dict, bust: dict) -> None:
+    extra = bust.get("message") or ""
+    if extra:
+        result["message"] = f"{result['message']} {extra}".strip()
+    result["cache_bust"] = {
+        key: bust[key]
+        for key in ("status", "reason", "url", "resource_id")
+        if bust.get(key) not in (None, "")
+    }
+    if not bust.get("ok", True):
+        result["ok"] = False
 
 
 def activate_custom_template(ha_ws_call) -> dict:
@@ -719,11 +966,11 @@ def activate_custom_template(ha_ws_call) -> dict:
     }
 
 
-def activate(profile: str, ha_ws_call, token: str) -> dict:
+def activate(profile: str, ha_ws_call, token: str, *, cache_bust: str | None = None) -> dict:
     if profile == "package":
         return activate_package(ha_ws_call, token)
     if profile == "frontend_module":
-        return activate_frontend_module()
+        return activate_frontend_module(cache_bust=cache_bust)
     if profile == "custom_template":
         return activate_custom_template(ha_ws_call)
     return {"ok": False, "activation": "unknown_profile", "message": profile}
@@ -956,6 +1203,7 @@ def apply_managed_files(
             package_written = [item for item in written_metas if item["entry"].profile == "package"]
             other_written = [item for item in written_metas if item["entry"].profile != "package"]
 
+            result_by_path: dict[str, dict] = {}
             if package_written:
                 activation = activate("package", ha_ws_call, token)
                 if not activation.get("ok"):
@@ -971,13 +1219,15 @@ def apply_managed_files(
                         commit_sha=commit_sha,
                     )
                     applied.append(item["entry"].path)
-                    results.append({
+                    result = {
                         "ok": True,
                         "message": (
                             f"{item['entry'].path}: Applied, verified, config valid, reloaded. "
                             f"{activation.get('restart_hint', '')}"
                         ).strip(),
-                    })
+                    }
+                    results.append(result)
+                    result_by_path[item["entry"].path] = result
 
             for item in other_written:
                 # reload_all already reloads custom Jinja templates; skip a second call.
@@ -989,7 +1239,12 @@ def apply_managed_files(
                         "restart_required": False,
                     }
                 else:
-                    activation = activate(item["entry"].profile, ha_ws_call, token)
+                    activation = activate(
+                        item["entry"].profile,
+                        ha_ws_call,
+                        token,
+                        cache_bust=item["entry"].cache_bust,
+                    )
                 if not activation.get("ok"):
                     raise RuntimeError(
                         f"{item['entry'].path}: activation failed: {activation.get('message')}"
@@ -1002,10 +1257,25 @@ def apply_managed_files(
                     commit_sha=commit_sha,
                 )
                 applied.append(item["entry"].path)
-                results.append({
+                result = {
                     "ok": True,
                     "message": f"{item['entry'].path}: Applied and verified. {activation.get('message', '')}",
-                })
+                }
+                results.append(result)
+                result_by_path[item["entry"].path] = result
+
+            # Cache-bust after every file is written, verified and activated.
+            # Failures are reported; they must not roll back the deployed files.
+            for item in written_metas:
+                entry = item["entry"]
+                if entry.profile != "frontend_module" or entry.cache_bust != CACHE_BUST_CONTENT_HASH:
+                    continue
+                bust = apply_frontend_cache_bust(
+                    ha_ws_call, entry, item["change"]["github_hash"]
+                )
+                result = result_by_path.get(entry.path)
+                if result is not None:
+                    _merge_cache_bust_result(result, bust)
 
             save_bases(bases)
             journal["phase"] = "done"

@@ -55,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.9.0` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.8.3` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.9.0` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -112,7 +112,11 @@ Do not add any of the following unless the user explicitly approves a reviewed a
   behaviour.
 - Frontend modules may be staged under `www/.config-sync-preview/<commit-sha>/`
   preserving the path under `www/` so relative ES module imports work. Apply
-  alone may update the canonical `www/` path.
+  alone may update the canonical `www/` path. A `frontend_module` entry with
+  `cache_bust: content_hash` updates the matching Lovelace resource URL through
+  `lovelace/resources/list` and `lovelace/resources/update` after the file
+  write is verified. Import never writes `.storage`, never creates a missing
+  resource, and does not roll back a verified file if cache-busting fails.
 - Never auto-restart Core; invalid config must roll back; packages use
   `POST /api/config/core/check_config` then `homeassistant.reload_all`.
   Custom templates use `homeassistant.reload_custom_templates` (skipped when
@@ -246,6 +250,12 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Dashboard Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
 - Managed-file Apply uses atomic filesystem writes under `/homeassistant` with
   backup, read-back, config check (packages), activation/reload, and rollback.
+  After a verified `frontend_module` deploy with `cache_bust: content_hash`,
+  Import sets the matching Lovelace resource to
+  `<resource_url>?v=<sha256-prefix>` via the WebSocket API. A cache-bust
+  warning does not undo the file write. `lovelace.reload_resources` is YAML-mode
+  only and is not called; an already open dashboard may still need a normal
+  page refresh.
 - Every save is read back and hash-verified. For a dashboard Apply, verified
   LIVE plus persisted non-canonical/canonical provenance (read back from the
   shared file) are one transaction. Provenance persist failure rolls LIVE back
