@@ -10,8 +10,11 @@ from websocket import create_connection
 
 from dashboard_logic import (
     APPLYABLE_STATUSES,
+    CREATE_STATUS,
     MISSING_BASE_STATUS,
+    classify_missing_ha,
     classify_with_provenance,
+    dashboard_registration_payload,
     digest,
     is_ephemeral_dashboard,
     matches_preview,
@@ -651,13 +654,68 @@ def ha_ws_call(message_type, **payload):
         websocket.close()
 
 
+MISSING_DASHBOARD_MARKERS = (
+    "unknown config specified",
+    "no config found",
+)
+
+
 def ha_dashboard_config(relative):
     url_path = dashboard_url_path(relative)
     payload = {"url_path": url_path} if url_path else {}
-    result = ha_ws_call("lovelace/config", **payload)
+    try:
+        result = ha_ws_call("lovelace/config", **payload)
+    except RuntimeError as error:
+        message = str(error).lower()
+        if any(marker in message for marker in MISSING_DASHBOARD_MARKERS):
+            return None
+        raise
     if not isinstance(result, dict):
         raise RuntimeError(f"Dashboard {url_path or 'default'} returned invalid config.")
     return result
+
+
+def ha_registered_url_paths():
+    result = ha_ws_call("lovelace/dashboards/list")
+    paths = set()
+    if not isinstance(result, list):
+        raise RuntimeError("Dashboard list returned invalid result.")
+    for item in result:
+        if isinstance(item, dict) and isinstance(item.get("url_path"), str):
+            paths.add(item["url_path"])
+    return paths
+
+
+def create_dashboard(relative, desired):
+    url_path = dashboard_url_path(relative)
+    result = ha_ws_call(
+        "lovelace/dashboards/create",
+        **dashboard_registration_payload(url_path, desired),
+    )
+    if not isinstance(result, dict) or not result.get("id"):
+        raise RuntimeError(
+            f"Dashboard create for {url_path} did not return an id."
+        )
+    return result
+
+
+def delete_dashboard(dashboard_id):
+    ha_ws_call("lovelace/dashboards/delete", dashboard_id=dashboard_id)
+
+
+def restore_dashboard(relative, *, created_id, before):
+    """Undo a just-attempted Apply. Delete only a dashboard created in this Apply."""
+    if created_id:
+        delete_dashboard(created_id)
+        return ha_dashboard_config(relative) is None
+    if before is None:
+        url_path = dashboard_url_path(relative)
+        payload = {"url_path": url_path} if url_path else {}
+        ha_ws_call("lovelace/config/delete", **payload)
+        return ha_dashboard_config(relative) is None
+    save_dashboard(relative, before)
+    restored = ha_dashboard_config(relative)
+    return restored is not None and digest(restored) == digest(before)
 
 
 def save_dashboard(relative, desired):
@@ -746,6 +804,7 @@ def collect_changes(commit_sha="", revision=None):
     store = live_provenance_store()
     pending_adopt = []
     changes = []
+    registered_paths = None
     if not root.exists():
         return changes
     for github_path in sorted(root.glob("*.json")):
@@ -758,13 +817,22 @@ def collect_changes(commit_sha="", revision=None):
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
         live_entry = store.dashboards.get(relative)
-        status, css, selectable, reason, should_adopt = classify_with_provenance(
-            github,
-            current,
-            base,
-            reviewing_canonical=reviewing_canonical,
-            provenance=live_entry,
-        )
+        if current is None:
+            if registered_paths is None:
+                registered_paths = ha_registered_url_paths()
+            url_path = dashboard_url_path(relative)
+            status, css, selectable, reason = classify_missing_ha(
+                url_path, registered=url_path in registered_paths
+            )
+            should_adopt = False
+        else:
+            status, css, selectable, reason, should_adopt = classify_with_provenance(
+                github,
+                current,
+                base,
+                reviewing_canonical=reviewing_canonical,
+                provenance=live_entry,
+            )
         if should_adopt and revision is not None:
             pending_adopt.append((relative, digest(current)))
         warnings = format_scan_warnings(github, "\n".join(pretty_lines(github)))
@@ -1055,9 +1123,32 @@ def apply_selected():
                         results.append({"ok": False, "message": f"{relative}: HA changed before save. Review again."})
                         continue
                     before = change["current"]
-                    save_dashboard(relative, change["github"])
-                    verified = ha_dashboard_config(relative)
-                    if digest(verified) != digest(change["github"]):
+                    created_id = None
+                    try:
+                        if change["status"] == CREATE_STATUS:
+                            created_id = create_dashboard(relative, change["github"])["id"]
+                        save_dashboard(relative, change["github"])
+                        verified = ha_dashboard_config(relative)
+                    except Exception as apply_error:
+                        if created_id:
+                            try:
+                                restore_dashboard(
+                                    relative, created_id=created_id, before=before
+                                )
+                            except Exception:
+                                pass
+                        results.append({
+                            "ok": False,
+                            "message": f"{relative}: Apply failed: {apply_error}",
+                        })
+                        continue
+                    if verified is None or digest(verified) != digest(change["github"]):
+                        try:
+                            restore_dashboard(
+                                relative, created_id=created_id, before=before
+                            )
+                        except Exception:
+                            pass
                         results.append({
                             "ok": False,
                             "message": f"{relative}: save returned, but read-back verification failed.",
@@ -1079,9 +1170,9 @@ def apply_selected():
                     except (OSError, InvalidProvenance) as persist_error:
                         rolled_back = False
                         try:
-                            save_dashboard(relative, before)
-                            restored = ha_dashboard_config(relative)
-                            rolled_back = digest(restored) == digest(before)
+                            rolled_back = restore_dashboard(
+                                relative, created_id=created_id, before=before
+                            )
                         except Exception:
                             rolled_back = False
                         if not rolled_back:
@@ -1107,9 +1198,14 @@ def apply_selected():
                             })
                         continue
                     store = next_store
+                    applied_label = (
+                        "Created, applied and verified."
+                        if created_id
+                        else "Applied and verified."
+                    )
                     results.append({
                         "ok": True,
-                        "message": f"{relative}: Applied and verified.",
+                        "message": f"{relative}: {applied_label}",
                     })
                     applied.append(relative)
             if managed_selected:

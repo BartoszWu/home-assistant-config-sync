@@ -55,7 +55,7 @@ Current product identity:
 | Directory | Display name | Slug | Current source version |
 | --- | --- | --- | --- |
 | `export/` | `HA Config Sync — Export` | `ha_config_sync_export` | `0.9.0` |
-| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.9.0` |
+| `import/` | `HA Config Sync — Import` | `ha_config_sync_import` | `0.10.0` |
 
 Treat the slugs as stable identifiers. Do not rename them after users have installed the Apps.
 
@@ -232,22 +232,32 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Path traversal and nested dashboard paths are rejected.
 - Desired dashboard JSON and managed-file contents are scanned for credential-like fields and URLs. Hits are review warnings with field path and source line; they do not hide the Apply checkbox. Apply still requires explicit selection, a fresh conflict check, and read-back verification. Warnings never echo matched values.
 - Status is derived from GitHub HEAD, current HA state, and the exported/base hash.
+- A Git dashboard JSON whose Lovelace `url_path` is not registered in HA is
+  labeled `READY TO APPLY — CREATE DASHBOARD`. Apply creates it through
+  `lovelace/dashboards/create` (title/icon from the first Git view; sidebar
+  visible, not admin-only) and then `lovelace/config/save`. HA requires a
+  hyphen in the URL path. Import deletes that dashboard only to roll back a
+  create from the same Apply; it does not delete other dashboards.
 - A registered dashboard without a base hash may bootstrap only when its current
-  HA configuration is a semantically empty shell. Import labels this state
+  HA configuration is a semantically empty shell, or when HA has the dashboard
+  but no saved Lovelace config yet. Import labels the empty-shell case
   `READY TO APPLY — NEW DASHBOARD`, carries the exact HA preview hash in the
   review form, and requires the same hash immediately before saving.
 - A dashboard that is already identical in GitHub and HA but still lacks a
   base is labeled `IN SYNC — BASE NOT INITIALIZED` and offers an explicit
   Export retry. A non-empty dashboard without a base remains a conflict.
-- Apply is allowed only for `READY TO APPLY` or the guarded
-  `READY TO APPLY — NEW DASHBOARD` bootstrap state (dashboards), or for managed
+- Apply is allowed only for `READY TO APPLY`, the guarded
+  `READY TO APPLY — NEW DASHBOARD` bootstrap state, or
+  `READY TO APPLY — CREATE DASHBOARD` (dashboards), or for managed
   files `READY TO APPLY` / `READY TO APPLY — NO BASE` (explicit first Apply when
   BASE is missing and LIVE already differs from Git).
 - Managed files that already match GitHub/HA but lack a base are
   `IN SYNC — BASE NOT INITIALIZED`; **Initialize managed-file bases** only
   adopts that in-sync case. Drift without a base is never auto-baselined.
 - Every POST refreshes GitHub and repeats the conflict check before saving.
-- Dashboard Apply uses `lovelace/config/save` through the Home Assistant WebSocket API.
+- Dashboard Apply uses `lovelace/config/save` through the Home Assistant
+  WebSocket API. Unregistered dashboards are created first with
+  `lovelace/dashboards/create`. Import still does not write `.storage`.
 - Managed-file Apply uses atomic filesystem writes under `/homeassistant` with
   backup, read-back, config check (packages), activation/reload, and rollback.
   After a verified `frontend_module` deploy with `cache_bust: content_hash`,

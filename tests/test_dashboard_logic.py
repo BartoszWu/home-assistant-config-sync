@@ -8,10 +8,17 @@ sys.path.insert(0, str(ROOT / "import"))
 
 from dashboard_logic import (  # noqa: E402
     BOOTSTRAP_STATUS,
+    CREATE_STATUS,
+    CREATE_REASON,
     MISSING_BASE_STATUS,
     NONCANONICAL_STATUS,
+    NO_HYPHEN_REASON,
+    UNSAVED_REASON,
+    can_create_dashboard_path,
     classify,
+    classify_missing_ha,
     classify_with_provenance,
+    dashboard_registration_payload,
     digest,
     is_empty_dashboard,
     is_ephemeral_dashboard,
@@ -355,6 +362,82 @@ class EphemeralDashboardTests(unittest.TestCase):
                       "dashboard-preview-old.json", "dashboard-temperatura.json",
                       "", None, 42, {"x": 1}):
             self.assertFalse(is_ephemeral_dashboard(value), value)
+
+
+class MissingHaDashboardTests(unittest.TestCase):
+    def test_unregistered_hyphenated_path_is_create_ready(self):
+        status, css, selectable, reason = classify_missing_ha(
+            "dashboard-diagnostyka", registered=False
+        )
+        self.assertEqual(status, CREATE_STATUS)
+        self.assertEqual(css, "bootstrap")
+        self.assertTrue(selectable)
+        self.assertEqual(reason, CREATE_REASON)
+
+    def test_registered_without_saved_config_is_bootstrap_ready(self):
+        status, css, selectable, reason = classify_missing_ha(
+            "dashboard-diagnostyka", registered=True
+        )
+        self.assertEqual(status, BOOTSTRAP_STATUS)
+        self.assertTrue(selectable)
+        self.assertEqual(reason, UNSAVED_REASON)
+
+    def test_default_lovelace_without_config_does_not_create(self):
+        status, _, selectable, reason = classify_missing_ha(None, registered=False)
+        self.assertEqual(status, BOOTSTRAP_STATUS)
+        self.assertTrue(selectable)
+        self.assertEqual(reason, UNSAVED_REASON)
+
+    def test_unregistered_path_without_hyphen_is_blocked(self):
+        status, css, selectable, reason = classify_missing_ha("map", registered=False)
+        self.assertEqual(status, "CONFLICT")
+        self.assertEqual(css, "conflict")
+        self.assertFalse(selectable)
+        self.assertEqual(reason, NO_HYPHEN_REASON)
+
+    def test_create_path_requires_hyphenated_slug(self):
+        self.assertTrue(can_create_dashboard_path("dashboard-diagnostyka"))
+        for value in ("map", "Diagnostyka", "dashboard/diagnostyka", "", None, 1):
+            self.assertFalse(can_create_dashboard_path(value), value)
+
+    def test_registration_payload_uses_first_view_title_and_icon(self):
+        self.assertEqual(
+            dashboard_registration_payload(
+                "dashboard-diagnostyka",
+                {
+                    "views": [
+                        {
+                            "title": "Diagnostyka",
+                            "icon": "mdi:heart-pulse",
+                            "path": "diagnostyka",
+                        }
+                    ]
+                },
+            ),
+            {
+                "url_path": "dashboard-diagnostyka",
+                "title": "Diagnostyka",
+                "icon": "mdi:heart-pulse",
+                "show_in_sidebar": True,
+                "require_admin": False,
+            },
+        )
+
+    def test_registration_payload_falls_back_to_humanized_url_path(self):
+        self.assertEqual(
+            dashboard_registration_payload("dashboard-foo-bar", {"views": []}),
+            {
+                "url_path": "dashboard-foo-bar",
+                "title": "Foo Bar",
+                "show_in_sidebar": True,
+                "require_admin": False,
+            },
+        )
+
+    def test_missing_ha_preview_hash_is_stable(self):
+        preview = digest(None)
+        self.assertTrue(matches_preview(None, preview))
+        self.assertFalse(matches_preview(EMPTY_DASHBOARD, preview))
 
 
 if __name__ == "__main__":

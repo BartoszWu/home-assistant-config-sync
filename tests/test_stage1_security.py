@@ -371,6 +371,130 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         self.assertNotIn('other.json', store.dashboards)
         export.assert_called_once_with(['test.json'])
 
+class CreateMissingDashboardApplyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import app as import_app
+        except ModuleNotFoundError as exc:
+            raise unittest.SkipTest(
+                "Install Import's Flask/websocket-client dependencies for Apply tests"
+            ) from exc
+        cls.app_module = import_app
+
+    def setUp(self):
+        app = self.app_module
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        (self.repo / 'dashboards').mkdir()
+        (self.repo / 'state').mkdir()
+        self.desired = {
+            'views': [{
+                'title': 'Diagnostyka',
+                'icon': 'mdi:heart-pulse',
+                'path': 'diagnostyka',
+            }]
+        }
+        self.relative = 'dashboard-diagnostyka.json'
+        (self.repo / 'dashboards' / self.relative).write_text(json.dumps(self.desired))
+        (self.repo / 'state/dashboard-bases.json').write_text(json.dumps({
+            'dashboards': {}}))
+        self.live = None
+        self.registered = set()
+        self.created = []
+        self.deleted = []
+        self.form = {
+            'selected': self.relative,
+            'preview_hash': self.relative + ':' + app.digest(None),
+            'desired_hash': self.relative + ':' + app.digest(self.desired),
+            'source': 'main',
+            'reviewed_sha': REVIEW_SHA,
+        }
+        for p in [patch.object(app, 'WORKDIR', self.repo),
+                  patch.object(app, 'refresh_repo', return_value=fake_revision()),
+                  patch.object(app, 'ha_dashboard_config', side_effect=self._ha_cfg),
+                  patch.object(app, 'ha_registered_url_paths', side_effect=lambda: set(self.registered)),
+                  patch.object(app, 'IMPORT_STATE_PATH', Path(self.tmp.name) / 'prov-local.json'),
+                  patch.object(app, 'SHARED_STATE_PATH', Path(self.tmp.name) / '.config-sync/live-dashboards.json')]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _ha_cfg(self, _relative):
+        return None if self.live is None else copy.deepcopy(self.live)
+
+    def _create(self, relative, desired):
+        self.created.append((relative, copy.deepcopy(desired)))
+        self.registered.add('dashboard-diagnostyka')
+        return {'id': 'dashboard-diagnostyka', 'url_path': 'dashboard-diagnostyka'}
+
+    def _save(self, _relative, value):
+        self.live = copy.deepcopy(value)
+
+    def _delete(self, dashboard_id):
+        self.deleted.append(dashboard_id)
+        self.registered.discard(dashboard_id)
+        self.live = None
+
+    def submit(self):
+        app = self.app_module
+        return app.app.test_client().post(
+            '/apply',
+            data=self.form,
+            environ_overrides={'REMOTE_ADDR': '172.30.32.2'},
+        )
+
+    def test_unknown_config_websocket_error_is_missing_dashboard(self):
+        app = self.app_module
+        with patch.object(
+            app,
+            'ha_ws_call',
+            side_effect=RuntimeError(
+                'Home Assistant WebSocket command failed: '
+                'Unknown config specified: dashboard-diagnostyka'
+            ),
+        ):
+            self.assertIsNone(app.ha_dashboard_config(self.relative))
+
+    def test_review_does_not_fail_closed_for_unknown_lovelace_config(self):
+        app = self.app_module
+        html = app.app.test_client().get(
+            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+        ).get_data(as_text=True)
+        self.assertNotIn('Unknown config specified', html)
+        self.assertIn('READY TO APPLY — CREATE DASHBOARD', html)
+        self.assertIn('dashboard-diagnostyka', html)
+
+    def test_apply_creates_then_saves_unregistered_dashboard(self):
+        app = self.app_module
+        with patch.object(app, 'create_dashboard', side_effect=self._create) as created, \
+             patch.object(app, 'save_dashboard', side_effect=self._save) as saved, \
+             patch.object(app, 'delete_dashboard', side_effect=self._delete) as deleted, \
+             patch.object(app, 'request_export') as export:
+            html = self.submit().get_data(as_text=True)
+        created.assert_called_once_with(self.relative, self.desired)
+        saved.assert_called_once_with(self.relative, self.desired)
+        deleted.assert_not_called()
+        export.assert_called_once_with([self.relative])
+        self.assertIn('Created, applied and verified', html)
+        from deployment_provenance import load_json_store
+        entry = load_json_store(app.IMPORT_STATE_PATH).dashboards[self.relative]
+        self.assertTrue(entry.canonical)
+
+    def test_apply_deletes_created_dashboard_when_provenance_fails(self):
+        app = self.app_module
+        with patch.object(app, 'create_dashboard', side_effect=self._create), \
+             patch.object(app, 'save_dashboard', side_effect=self._save), \
+             patch.object(app, 'delete_dashboard', side_effect=self._delete) as deleted, \
+             patch.object(app, 'persist_provenance', side_effect=OSError('disk full')), \
+             patch.object(app, 'request_export') as export:
+            html = self.submit().get_data(as_text=True)
+        deleted.assert_called_once_with('dashboard-diagnostyka')
+        self.assertIsNone(self.live)
+        self.assertIn('rolled back', html)
+        export.assert_not_called()
+
+
 class ResourcePolicyTests(unittest.TestCase):
     def test_hacs_resource_drops_version_without_false_mac_exclusion(self):
         from dashboard_manifest import resource_record

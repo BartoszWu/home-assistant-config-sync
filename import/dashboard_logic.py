@@ -4,9 +4,25 @@ import re
 
 
 BOOTSTRAP_STATUS = "READY TO APPLY — NEW DASHBOARD"
+CREATE_STATUS = "READY TO APPLY — CREATE DASHBOARD"
 MISSING_BASE_STATUS = "IN SYNC — BASE NOT INITIALIZED"
 NONCANONICAL_STATUS = "LIVE FROM FEATURE"
-APPLYABLE_STATUSES = {"READY TO APPLY", BOOTSTRAP_STATUS}
+APPLYABLE_STATUSES = {"READY TO APPLY", BOOTSTRAP_STATUS, CREATE_STATUS}
+
+CREATE_REASON = (
+    "HA has no dashboard with this URL path. "
+    "Apply will create it, then save the Git configuration."
+)
+UNSAVED_REASON = (
+    "HA has the dashboard but no saved Lovelace config yet. "
+    "Apply will save the Git configuration."
+)
+NO_HYPHEN_REASON = (
+    "HA has no dashboard with this URL path. "
+    "Home Assistant requires a hyphen in the URL, so Import cannot create it."
+)
+DASHBOARD_PATH_RE = re.compile(r"^[a-z0-9_-]+$")
+MDI_ICON_RE = re.compile(r"^mdi:[a-z0-9-]+$")
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -235,6 +251,57 @@ def parse_preview_hashes(values):
 
 def matches_preview(current, preview_hash):
     return bool(HASH_RE.fullmatch(preview_hash)) and digest(current) == preview_hash
+
+
+def can_create_dashboard_path(url_path):
+    """Home Assistant rejects storage dashboards whose url_path has no hyphen."""
+    return isinstance(url_path, str) and "-" in url_path and bool(
+        DASHBOARD_PATH_RE.fullmatch(url_path)
+    )
+
+
+def classify_missing_ha(url_path, *, registered):
+    """Status when Git has a dashboard JSON but Lovelace config cannot be read."""
+    if not url_path or registered:
+        return BOOTSTRAP_STATUS, "bootstrap", True, UNSAVED_REASON
+    if can_create_dashboard_path(url_path):
+        return CREATE_STATUS, "bootstrap", True, CREATE_REASON
+    return "CONFLICT", "conflict", False, NO_HYPHEN_REASON
+
+
+def dashboard_registration_payload(url_path, github):
+    """Fields for lovelace/dashboards/create. Title/icon come from the Git views."""
+    if not can_create_dashboard_path(url_path):
+        raise ValueError("Dashboard URL path cannot be created in Home Assistant.")
+    title = None
+    icon = None
+    views = github.get("views") if isinstance(github, dict) else None
+    if isinstance(views, list):
+        for view in views:
+            if not isinstance(view, dict):
+                continue
+            if title is None:
+                value = view.get("title")
+                if isinstance(value, str) and value.strip():
+                    title = value.strip()
+            if icon is None:
+                value = view.get("icon")
+                if isinstance(value, str) and MDI_ICON_RE.fullmatch(value):
+                    icon = value
+            if title and icon:
+                break
+    if not title:
+        stem = url_path.removeprefix("dashboard-")
+        title = stem.replace("-", " ").strip().title() or url_path
+    payload = {
+        "url_path": url_path,
+        "title": title,
+        "show_in_sidebar": True,
+        "require_admin": False,
+    }
+    if icon:
+        payload["icon"] = icon
+    return payload
 
 
 # Ephemeral agent scratch dashboard. Never exported, synced, reviewed or

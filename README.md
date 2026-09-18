@@ -76,13 +76,19 @@ stale browser caches without direct `.storage` access. Import lists and updates
 resources through the Home Assistant WebSocket API; it does not create a missing
 resource. An already open dashboard may still require a normal page refresh.
 
-For a new dashboard, first create its empty UI-controlled shell in Home
-Assistant so the URL path and sidebar metadata exist. Import recognizes that
-semantically empty shell without requiring an exported base, labels it
-`READY TO APPLY — NEW DASHBOARD`, and requires the exact HA configuration hash
+For a dashboard JSON that exists in Git but is not registered in Home
+Assistant, Import 0.10 labels it `READY TO APPLY — CREATE DASHBOARD`. Apply
+creates the Lovelace dashboard through `lovelace/dashboards/create` (title and
+icon from the first Git view; sidebar visible, not admin-only), then saves the
+Git configuration. Home Assistant requires a hyphen in the URL path; a Git
+file whose stem has no hyphen stays a conflict. A dashboard that is already
+registered as a semantically empty shell still uses
+`READY TO APPLY — NEW DASHBOARD`. Both states require the exact preview hashes
 from the review immediately before Apply. After the verified bootstrap Apply,
-the normal automatic Export creates the base hash. A non-empty dashboard
-without a base remains blocked as a conflict.
+the normal automatic Export creates the base hash. A non-empty registered
+dashboard without a base remains blocked as a conflict. If create or save
+fails after Import registered the dashboard, Import deletes that dashboard as
+rollback; it does not delete dashboards it did not create in that Apply.
 
 If Apply succeeds but the automatic Export request fails, GitHub and HA match
 while the base is still absent. Import reports
