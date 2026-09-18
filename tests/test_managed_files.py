@@ -274,6 +274,7 @@ class StagingAndApplyTests(unittest.TestCase):
         allowed = {entry.path for entry in mf.load_policy(ROOT / "import" / "managed_files.yaml").exact}
         self.assertNotIn("packages/ogrzewanie.yaml", allowed)
         self.assertIn("packages/temperatura.yaml", allowed)
+        self.assertIn("packages/diagnostyka.yaml", allowed)
         self.assertIn("custom_templates/temperatura.jinja", allowed)
         self.assertNotIn("custom_templates/other.jinja", allowed)
         self.assertNotIn("custom_templates/temperatura.yaml", allowed)
@@ -285,6 +286,7 @@ class StagingAndApplyTests(unittest.TestCase):
             [(e.path, e.profile) for e in policy.exact],
             [
                 ("packages/temperatura.yaml", "package"),
+                ("packages/diagnostyka.yaml", "package"),
                 ("www/temperature-card.mjs", "frontend_module"),
                 ("custom_templates/temperatura.jinja", "custom_template"),
             ],

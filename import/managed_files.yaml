@@ -14,6 +14,9 @@ managed_files:
   - path: packages/temperatura.yaml
     profile: package
 
+  - path: packages/diagnostyka.yaml
+    profile: package
+
 # After a verified Apply, Import updates the matching Lovelace resource URL
   # to /local/...?v=<content-hash>. It does not write .storage.
   # Declared `resources` below are created via lovelace/resources/create when
