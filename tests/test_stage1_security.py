@@ -551,7 +551,12 @@ class LovelaceResourceApplyTests(unittest.TestCase):
             'reviewed_sha': REVIEW_SHA,
         }
         from managed_files import ManagedEntry
-        self.entry = ManagedEntry('www/dashboard/diagnostyka.mjs', 'frontend_module')
+        self.entry = ManagedEntry(
+            'www/dashboard/diagnostyka.mjs',
+            'frontend_module',
+            resource_url=self.resource_url,
+            cache_bust='content_hash',
+        )
         for p in [
             patch.object(app, 'WORKDIR', self.repo),
             patch.object(app, 'refresh_repo', return_value=fake_revision()),
@@ -640,7 +645,7 @@ class LovelaceResourceApplyTests(unittest.TestCase):
             raise AssertionError(f'review must not call {message_type}')
 
         with patch.object(app, 'ha_ws_call', side_effect=ws), \
-             patch.object(app, 'managed_entries_for_revision', return_value=[]):
+             patch.object(app, 'managed_entries_for_revision', return_value=[self.entry]):
             html = app.app.test_client().get(
                 '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
             ).get_data(as_text=True)

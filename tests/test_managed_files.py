@@ -299,10 +299,7 @@ class StagingAndApplyTests(unittest.TestCase):
         card = next(entry for entry in policy.exact if entry.path == "www/temperature-card.mjs")
         self.assertEqual(card.resource_url, "/local/temperature-card.mjs")
         self.assertEqual(card.cache_bust, "content_hash")
-        self.assertEqual(
-            [(spec.url, spec.type) for spec in policy.resources],
-            [("/local/dashboard/diagnostyka.mjs", "module")],
-        )
+        self.assertEqual(policy.resources, ())
         self.assertFalse(
             any(rule.prefix.startswith("custom_templates/") for rule in policy.prefixes)
         )
@@ -679,6 +676,13 @@ class PrefixDiscoveryTests(unittest.TestCase):
                 "www/temperature-card.mjs",
             ],
         )
+        by_path = {entry.path: entry for entry in discovered}
+        self.assertIsNone(
+            by_path["www/dashboard/shared/utils.mjs"].resource_url
+        )
+        self.assertIsNone(
+            by_path["www/dashboard/shared/utils.mjs"].cache_bust
+        )
 
     def test_discovered_modules_inherit_cache_bust_and_resource_url(self):
         self.policy = mf.ManagedPolicy(
@@ -702,6 +706,38 @@ class PrefixDiscoveryTests(unittest.TestCase):
         self.assertEqual(discovered[0].path, "www/dashboard/home-hero.mjs")
         self.assertEqual(discovered[0].resource_url, "/local/dashboard/home-hero.mjs")
         self.assertEqual(discovered[0].cache_bust, "content_hash")
+
+        specs = mf.resource_specs_for_entries(self.policy, discovered)
+        self.assertEqual(
+            [(spec.url, spec.type) for spec in specs],
+            [("/local/dashboard/home-hero.mjs", "module")],
+        )
+
+    def test_all_allowlisted_frontend_modules_get_resource_specs(self):
+        policy = mf.ManagedPolicy(
+            ha_root=self.root,
+            exact=(
+                mf.ManagedEntry(
+                    "www/temperature-card.mjs",
+                    "frontend_module",
+                    resource_url="/local/temperature-card.mjs",
+                    cache_bust="content_hash",
+                ),
+            ),
+            prefixes=(),
+            resources=(
+                mf.LovelaceResourceSpec(
+                    url="/local/temperature-card.mjs", type="module"
+                ),
+            ),
+        )
+
+        specs = mf.resource_specs_for_entries(policy, list(policy.exact))
+
+        self.assertEqual(
+            [(spec.url, spec.type) for spec in specs],
+            [("/local/temperature-card.mjs", "module")],
+        )
 
     def test_rejects_yaml_outside_prefix_and_traversal(self):
         with self.assertRaises(ValueError):
@@ -1237,6 +1273,49 @@ class LovelaceResourceDesiredStateTests(unittest.TestCase):
         self.assertEqual(changes[0]["status"], mf.RESOURCE_CREATE_STATUS)
         self.assertEqual([kind for kind, _ in ws.calls], ["lovelace/resources/list"])
         self.assertEqual(ws.resources, [])
+
+    def test_discovered_module_is_reviewed_created_and_cache_busted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            module = workdir / "www" / "dashboard" / "new-card.mjs"
+            module.parent.mkdir(parents=True)
+            module.write_text("export const card = true;\n", encoding="utf-8")
+            entry = mf.ManagedEntry(
+                path="www/dashboard/new-card.mjs",
+                profile="frontend_module",
+                resource_url="/local/dashboard/new-card.mjs",
+                cache_bust="content_hash",
+            )
+            policy = mf.ManagedPolicy(
+                ha_root=Path("/homeassistant"),
+                exact=(),
+                prefixes=(),
+            )
+            ws = FakeLovelace([])
+
+            changes = mf.collect_resource_changes(policy, ws, [entry])
+            self.assertEqual(len(changes), 1)
+            self.assertEqual(changes[0]["status"], mf.RESOURCE_CREATE_STATUS)
+            previews = {entry.resource_url: changes[0]["preview_ha_hash"]}
+            desired = {entry.resource_url: changes[0]["preview_desired_hash"]}
+
+            results, created = mf.apply_declared_resources(
+                [entry.resource_url],
+                previews,
+                desired,
+                policy,
+                ws,
+                entries=[entry],
+                workdir=workdir,
+            )
+
+            expected_url = mf.cache_busted_resource_url(
+                entry.resource_url, mf.file_digest(module.read_bytes())
+            )
+            self.assertTrue(results[0]["ok"])
+            self.assertEqual(results[0]["cache_bust"]["status"], "updated")
+            self.assertEqual(created, ["res-new-1"])
+            self.assertEqual(ws.resources[0]["url"], expected_url)
 
     def test_create_resource_and_idempotent_reapply(self):
         ws = FakeLovelace([])

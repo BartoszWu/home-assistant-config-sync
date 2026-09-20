@@ -391,15 +391,39 @@ def discover_managed_entries(workdir: Path, policy: ManagedPolicy) -> list[Manag
                 if rel in seen:
                     continue
                 seen.add(rel)
-                resource_url = default_resource_url(rel) if rule.cache_bust else None
+                is_entry_module = (
+                    PurePosixPath(rel).parent
+                    == PurePosixPath(rule.prefix.rstrip("/"))
+                )
+                resource_url = (
+                    default_resource_url(rel)
+                    if rule.cache_bust and is_entry_module else None
+                )
                 found.append(ManagedEntry(
                     path=rel,
                     profile=rule.profile,
                     resource_url=resource_url,
-                    cache_bust=rule.cache_bust,
+                    cache_bust=rule.cache_bust if is_entry_module else None,
                 ))
     found.sort(key=lambda entry: entry.path)
     return found
+
+
+def resource_specs_for_entries(
+    policy: ManagedPolicy,
+    entries: list[ManagedEntry] | tuple[ManagedEntry, ...],
+) -> tuple[LovelaceResourceSpec, ...]:
+    """Combine explicit resources with modules from the App-owned allowlist."""
+    specs = list(policy.resources)
+    seen = {spec.url for spec in specs}
+    for entry in entries:
+        if entry.profile != "frontend_module" or not entry.resource_url:
+            continue
+        if entry.resource_url in seen:
+            continue
+        seen.add(entry.resource_url)
+        specs.append(LovelaceResourceSpec(url=entry.resource_url, type="module"))
+    return tuple(specs)
 
 
 def relative_import_hints(relative: str, text: str, known_paths: set[str]) -> list[str]:
@@ -929,13 +953,20 @@ def classify_resource(spec: LovelaceResourceSpec, matches: list[dict]):
     return "CONFLICT", "conflict", False, RESOURCE_TYPE_CONFLICT_REASON
 
 
-def collect_resource_changes(policy: ManagedPolicy | None, ha_ws_call) -> list[dict]:
-    """Read-only review of declared Lovelace resources. Never creates or deletes."""
-    if policy is None or not policy.resources:
+def collect_resource_changes(
+    policy: ManagedPolicy | None,
+    ha_ws_call,
+    entries: list[ManagedEntry] | tuple[ManagedEntry, ...] = (),
+) -> list[dict]:
+    """Read-only review of allowlisted Lovelace resources. Never mutates HA."""
+    if policy is None:
+        return []
+    specs = resource_specs_for_entries(policy, entries)
+    if not specs:
         return []
     live = list_lovelace_resources(ha_ws_call)
     changes = []
-    for spec in policy.resources:
+    for spec in specs:
         matches = find_matching_lovelace_resources(live, spec.url)
         status, css, selectable, reason = classify_resource(spec, matches)
         live_fp = resource_live_fingerprint(spec, matches)
@@ -1007,11 +1038,20 @@ def apply_declared_resources(
     previews_desired: dict,
     policy: ManagedPolicy,
     ha_ws_call,
+    *,
+    entries: list[ManagedEntry] | tuple[ManagedEntry, ...] = (),
+    workdir: Path | None = None,
 ):
-    """Create missing declared Lovelace resources. Idempotent for matching URLs."""
+    """Create missing allowlisted Lovelace resources. Idempotent by base URL."""
     results = []
     created_ids: list[str] = []
-    spec_map = {spec.url: spec for spec in policy.resources}
+    specs = resource_specs_for_entries(policy, entries)
+    spec_map = {spec.url: spec for spec in specs}
+    entry_map = {
+        entry.resource_url: entry
+        for entry in entries
+        if entry.profile == "frontend_module" and entry.resource_url
+    }
     live = list_lovelace_resources(ha_ws_call)
     try:
         for url in selected:
@@ -1058,10 +1098,20 @@ def apply_declared_resources(
                 or not resource_urls_match(matches[0].get("url") or "", spec.url)
             ):
                 raise RuntimeError(f"{url}: create returned, but read-back verification failed.")
-            results.append({
+            result = {
                 "ok": True,
                 "message": f"{url}: Resource created and verified.",
-            })
+            }
+            entry = entry_map.get(url)
+            if entry is not None and workdir is not None:
+                module_path = workdir / entry.path
+                if module_path.is_symlink() or not module_path.is_file():
+                    raise RuntimeError(f"{url}: managed frontend module is missing.")
+                bust = apply_frontend_cache_bust(
+                    ha_ws_call, entry, file_digest(module_path.read_bytes())
+                )
+                _merge_cache_bust_result(result, bust)
+            results.append(result)
     except Exception as error:
         try:
             rollback_created_resources(ha_ws_call, created_ids)
@@ -1355,6 +1405,7 @@ def apply_managed_files(
     *,
     source_ref: str | None = None,
     commit_sha: str | None = None,
+    defer_cache_bust_urls: frozenset[str] = frozenset(),
 ):
     """Apply selected managed files with backup, atomic write, validate, activate, rollback."""
     entry_map = {entry.path: entry for entry in entries}
@@ -1519,6 +1570,8 @@ def apply_managed_files(
             for item in written_metas:
                 entry = item["entry"]
                 if entry.profile != "frontend_module" or entry.cache_bust != CACHE_BUST_CONTENT_HASH:
+                    continue
+                if entry.resource_url in defer_cache_bust_urls:
                     continue
                 bust = apply_frontend_cache_bust(
                     ha_ws_call, entry, item["change"]["github_hash"]
