@@ -5,8 +5,6 @@ Never copy home snapshots, credentials or identifying logs into this repo/PRs.
 
 ## Start and checks
 
-- Inspect Git and preserve user work. Fetch origin and compare `main...origin/main`;
-  update only by safe fast-forward. Read nested instructions for the task.
 - Run from this root: `./scripts/check` before every commit, plus `git diff --check`.
   This script defines required tools/checks; report failures and skipped checks.
 - For iteration: `python3 -m unittest discover -s tests -p 'test_stage1_security.py'`
@@ -54,8 +52,9 @@ Standalone code checks must not depend on private sibling files.
 
 ## Delivery
 
-- Stage explicit task paths, never `git add .`. PR: `codex/...`, push that branch
-  to this repo, no merge/deployment. No history rewrite/force push without consent.
+- Submit each independent change as a separate PR; update the existing PR for
+  follow-up fixes to the same task. No direct pushes to main or merge/deployment
+  without authorization.
 - Code intended for HA: bump only the changed App with
   `./scripts/bump <export|import> <patch|minor|major>`, then rerun checks.
 - Production updates use the App Repository; no HA-side git-pull aliases.
