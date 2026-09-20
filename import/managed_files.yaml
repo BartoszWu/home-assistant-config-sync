@@ -36,6 +36,7 @@ managed_files:
       - .js
       - .mjs
     profile: frontend_module
+    cache_bust: content_hash
 
 # Explicit Lovelace resource desired state. Not inferred from managed files or
 # custom:* cards. The data repository cannot expand this list.

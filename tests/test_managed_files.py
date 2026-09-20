@@ -295,7 +295,7 @@ class StagingAndApplyTests(unittest.TestCase):
         self.assertEqual(policy.prefixes[0].prefix, "www/dashboard/")
         self.assertEqual(policy.prefixes[0].extensions, (".js", ".mjs"))
         self.assertEqual(policy.prefixes[0].profile, "frontend_module")
-        self.assertIsNone(policy.prefixes[0].cache_bust)
+        self.assertEqual(policy.prefixes[0].cache_bust, "content_hash")
         card = next(entry for entry in policy.exact if entry.path == "www/temperature-card.mjs")
         self.assertEqual(card.resource_url, "/local/temperature-card.mjs")
         self.assertEqual(card.cache_bust, "content_hash")
@@ -679,6 +679,29 @@ class PrefixDiscoveryTests(unittest.TestCase):
                 "www/temperature-card.mjs",
             ],
         )
+
+    def test_discovered_modules_inherit_cache_bust_and_resource_url(self):
+        self.policy = mf.ManagedPolicy(
+            ha_root=self.root,
+            exact=(),
+            prefixes=(
+                mf.PrefixRule(
+                    "www/dashboard/",
+                    (".js", ".mjs"),
+                    "frontend_module",
+                    cache_bust="content_hash",
+                ),
+            ),
+        )
+        module = self.work / "www" / "dashboard" / "home-hero.mjs"
+        module.write_text("export const hero = true;\n", encoding="utf-8")
+
+        discovered = mf.discover_managed_entries(self.work, self.policy)
+
+        self.assertEqual(len(discovered), 1)
+        self.assertEqual(discovered[0].path, "www/dashboard/home-hero.mjs")
+        self.assertEqual(discovered[0].resource_url, "/local/dashboard/home-hero.mjs")
+        self.assertEqual(discovered[0].cache_bust, "content_hash")
 
     def test_rejects_yaml_outside_prefix_and_traversal(self):
         with self.assertRaises(ValueError):

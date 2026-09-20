@@ -69,8 +69,9 @@ Exact allowlisted files stay in `import/managed_files.yaml`: `packages/temperatu
 Frontend preview staging writes
 `/homeassistant/www/.config-sync-preview/<commit>/…` while preserving directory structure so relative ES module imports resolve. Canonical `www/` paths change only on Apply.
 
-`frontend_module` + `cache_bust: content_hash` — after a successful Managed File
-deploy, Import updates the matching Lovelace resource URL to include a
+All allowlisted `frontend_module` files, including modules discovered under
+`www/dashboard/`, use `cache_bust: content_hash`. After a successful Managed
+File deploy, Import updates the matching Lovelace resource URL to include a
 content-derived version query (`/local/…?v=<sha256-prefix>`). This prevents
 stale browser caches without direct `.storage` access. Import lists and updates
 resources through the Home Assistant WebSocket API. A cache-bust warning does
