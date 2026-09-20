@@ -1,77 +1,64 @@
-# HA Config Sync — agent instructions
+# HA Config Sync
 
-This public repository contains the Export and Import Apps. Home data belongs
-in the separate private `home-assistant-config` repository. Never copy its data,
-inventory, credentials or raw logs into this repository, tests or PRs.
+Public App code only; private home data belongs in `home-assistant-config`.
+Never copy home snapshots, credentials or identifying logs into this repo/PRs.
 
-## Start and commands
+## Start and checks
 
-Run commands from this repository root. Read `git status --short --branch`,
-preserve unrelated work, fetch `origin`, and compare `main...origin/main`
-before editing. Update only by fast-forward when local work is safe.
-Read nested `AGENTS.md` files before editing their directories.
+- Inspect Git and preserve user work. Fetch origin and compare `main...origin/main`;
+  update only by safe fast-forward. Read nested instructions for the task.
+- Run from this root: `./scripts/check` before every commit, plus `git diff --check`.
+  This script defines required tools/checks; report failures and skipped checks.
+- For iteration: `python3 -m unittest discover -s tests -p 'test_stage1_security.py'`
+  or the relevant test file; JS: `node --test tests/test_visual_preview.mjs`.
+- Versions/dependencies come from App `config.yaml` and Dockerfiles. Do not
+  duplicate them here. Docs-only changes need no bump, HA access or deployment.
 
-- Required before every commit: `./scripts/check`.
-- Focused Python test: `python3 -m unittest discover -s tests -p 'test_stage1_security.py'`.
-- Preview JavaScript: `node --check import/static/visual-preview.mjs` and
-  `node --test tests/test_visual_preview.mjs`.
-- Final diff: `git diff --check`, `git diff`, `git status --short`.
+## Read for the task
 
-`scripts/check` is the executable validation contract: Ruby with YAML, Python 3,
-Node.js for JavaScript checks, and Bash. Read the script if setup fails; report
-missing dependencies or skipped checks accurately. Runtime dependencies and
-versions are defined in each App's Dockerfile and `config.yaml`.
-Documentation-only changes still run `./scripts/check`; they need no App
-version bump, HA access or deployment.
+Use sections of [README](README.md), not the entire project history:
 
-## Read the relevant contracts before implementation
-
-Detailed mandatory rules are in [agent-contracts.md](docs/agent-contracts.md).
-All paths in that document's prose/code are repository-root-relative unless
-explicitly stated otherwise. Read the sections matching the task:
-
-| Task | Required sections |
+| Task | Read first |
 | --- | --- |
-| Any code or permission change | Security architecture and invariants; Credentials and sensitive data |
-| Export, sanitization, inventory | Export behavior; Stage 2 analysis contract, then `STAGE2.md` |
-| Import, UI, Apply, managed files | Import behavior; Security architecture and invariants |
-| Release | Development and release workflow |
-| Installation/migration | Home Assistant migration and testing rules; Current migration checkpoint (historical, verify LIVE) |
+| Permissions/credentials | Architecture; Credentials |
+| Export/sanitization | Stage 1 inventory and safety contract |
+| Analysis and policy | [STAGE2.md](STAGE2.md) |
+| Import/Apply | Import source revision; Canonical vs feature deployments; Managed files and frontend modules |
+| Preview UI | Visual dashboard preview (Import) |
+| Release/installation | Development workflow; Add to Home Assistant |
 
-Use [README.md](README.md) for architecture/setup. For work involving the house,
-read the parent workspace `AGENTS.md` and its
+For house-specific work also read the workspace instructions and
 [project skill](../.agents/skills/home-assistant-project/SKILL.md), if available.
-A standalone code checkout must not rely on private sibling files to run checks.
+Standalone code checks must not depend on private sibling files.
 
-## Non-negotiable boundaries
+## Invariants to preserve
 
-- Export owns the GitHub write key and has no Web UI. Import has a distinct
-  read-only GitHub key and Ingress-only UI. Preserve the Ingress request check.
-- Never log, commit or include credentials, credential-bearing URLs, private
-  keys or `addon_config` contents in output. Keep synthetic fixtures sanitized.
-- Do not broaden permissions (`full_access`, Docker, host network, arbitrary
-  host mounts). Import writes only declared managed paths or supported HA APIs
-  after explicit approval, fresh conflict checks and read-back verification.
-- Never write `.storage`, bypass path guards, or let the data repository expand
-  the managed-file allowlist. Preserve AppArmor defense in depth.
-- Keep Apply pinned to its reviewed commit. Preserve rollback and fail-closed
-  provenance guards; feature deployments must never become canonical `main`
-  through Export. No automatic Core restart.
-- Export must preserve pending Git changes, avoid empty commits and never
-  delete dashboards automatically. Import never merges or pushes to GitHub.
-- Keep mirrored security/provenance modules identical across App build contexts;
-  `scripts/check` verifies this. Test regressions at the affected boundary.
+- Export owns the GitHub write key, with no UI. Import has a distinct read-only
+  key and Ingress-only UI. Never weaken the Ingress check or print secrets.
+- No permission expansion, `.storage` access, automatic Core restart or broader
+  host mounts. Managed-file allowlists live in App code, never in home data.
+  Preserve application path guards and AppArmor; synthetic fixtures only.
+- Apply requires explicit UI approval, immutable reviewed SHA, fresh conflict
+  check, atomic writes/rollback and read-back. Feature LIVE must never be
+  exported as canonical main. Missing/corrupt provenance after initialization
+  must fail closed; cached CANONICAL provenance cannot authorize writes.
+- Preserve pending Git dashboard edits, no-empty-commit and no automatic
+  dashboard deletion. Import never merges or pushes. Snapshot automations,
+  scripts and scenes do not imply Apply support.
+- Verified dashboard Apply requests Export once; blocked/failed Apply and
+  managed-file-only Apply do not. Discover installation IDs, never hard-code.
+- Preview frames remain non-interactive/read-only. Rendering failure must not
+  block the original diff or Apply, and preview copies must not mutate inputs.
+- Preserve identical security/provenance modules across App build contexts;
+  `scripts/check` enforces the mirrors. Add regression tests at changed boundaries.
 
-## PR and release
+## Delivery
 
-- A request for a PR authorizes a focused branch, commit, push and PR; use
-  `codex/...`, stage explicit paths, and target this repository's `main`.
-  It does not authorize a merge, release, installation or HA Apply.
-- Do not use `git add .`, include existing user changes, force-push or rewrite
-  published history without explicit authorization.
-- Describe the problem, resulting behavior, checks and any limitations in the PR.
-- Code intended for HA requires a bump of only the changed App using
-  `./scripts/bump <export|import> <patch|minor|major>`, then `./scripts/check`.
-  The bump/release scripts do not authorize production updates.
-- Keep these instructions and linked contracts aligned when behavior changes.
-  Read current versions from `config.yaml`; old migration notes are not LIVE facts.
+- Stage explicit task paths, never `git add .`. PR: `codex/...`, push that branch
+  to this repo, no merge/deployment. No history rewrite/force push without consent.
+- Code intended for HA: bump only the changed App with
+  `./scripts/bump <export|import> <patch|minor|major>`, then rerun checks.
+- Production updates use the App Repository; no HA-side git-pull aliases.
+  No GHCR/build infrastructure unless requested. Never remove credential backups
+  or migrate installations merely to test code; verify LIVE before such work.
+- Report scope, checks, limitations and commit/PR. Update docs when contracts change.
