@@ -57,6 +57,7 @@ from managed_files import (
     initialize_missing_bases,
     load_policy,
     record_last_apply,
+    resource_specs_for_entries,
     rollback_created_resources,
     validate_policy_path,
 )
@@ -1009,7 +1010,7 @@ def render_review(results=None, *, source=None, pin_sha=None):
             if MANAGED_POLICY is not None and not MANAGED_POLICY_ERROR:
                 try:
                     resource_changes = collect_resource_changes(
-                        MANAGED_POLICY, ha_ws_call
+                        MANAGED_POLICY, ha_ws_call, entries
                     )
                 except Exception as exception:
                     resource_error = str(exception)
@@ -1097,12 +1098,6 @@ def apply_selected():
             validate_policy_path(value)
     except ValueError:
         abort(400)
-    allowed_resources = {
-        spec.url for spec in (MANAGED_POLICY.resources if MANAGED_POLICY else ())
-    }
-    if any(value not in allowed_resources for value in resource_selected):
-        abort(400)
-
     reviewed_sha = (request.form.get("reviewed_sha") or "").strip()
     if not reviewed_sha:
         abort(400)
@@ -1172,6 +1167,15 @@ def apply_selected():
             allowed_managed = {entry.path for entry in entries}
             if any(value not in allowed_managed for value in managed_selected):
                 abort(400)
+            allowed_resources = {
+                spec.url
+                for spec in (
+                    resource_specs_for_entries(MANAGED_POLICY, entries)
+                    if MANAGED_POLICY else ()
+                )
+            }
+            if any(value not in allowed_resources for value in resource_selected):
+                abort(400)
             store = live_provenance_store()
             created_resource_ids = []
             resource_failed = False
@@ -1191,6 +1195,7 @@ def apply_selected():
                     token,
                     source_ref=revision.source_ref,
                     commit_sha=revision.commit_sha,
+                    defer_cache_bust_urls=frozenset(resource_selected),
                 )
                 results.extend(managed_results)
             if managed_applied:
@@ -1221,6 +1226,8 @@ def apply_selected():
                     resource_desired,
                     MANAGED_POLICY,
                     ha_ws_call,
+                    entries=entries,
+                    workdir=WORKDIR,
                 )
                 results.extend(resource_results)
                 resource_failed = any(not item.get("ok") for item in resource_results)

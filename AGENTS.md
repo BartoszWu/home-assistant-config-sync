@@ -115,10 +115,15 @@ Do not add any of the following unless the user explicitly approves a reviewed a
   alone may update the canonical `www/` path. A `frontend_module` entry with
   `cache_bust: content_hash` updates the matching Lovelace resource URL through
   `lovelace/resources/list` and `lovelace/resources/update` after the file
-  write is verified. Declared `resources` in `import/managed_files.yaml` may be
-  created through `lovelace/resources/create` after explicit review. Import never
-  writes `.storage`, never infers resources from `.mjs` files or `custom:*`
-  cards, and does not roll back a verified file if cache-busting fails.
+  write is verified. Every allowlisted `frontend_module` with a `resource_url`
+  is also offered as Lovelace resource desired state; this includes top-level
+  `.js`/`.mjs` dashboard modules discovered directly in the App-owned
+  `www/dashboard/` prefix. Nested modules remain managed dependencies and are
+  not registered as standalone Lovelace resources. Missing resources may be
+  created through `lovelace/resources/create` after explicit review.
+  Import never writes `.storage`, never infers resources from `custom:*` cards or
+  paths outside the allowlist, and does not roll back a verified file if
+  cache-busting fails.
 - Never auto-restart Core; invalid config must roll back; packages use
   `POST /api/config/core/check_config` then `homeassistant.reload_all`.
   Custom templates use `homeassistant.reload_custom_templates` (skipped when
@@ -252,7 +257,7 @@ Import is a long-running Flask/Gunicorn Ingress App. Preserve these properties:
 - Apply is allowed only for `READY TO APPLY`, the guarded
   `READY TO APPLY — NEW DASHBOARD` bootstrap state, or
   `READY TO APPLY — CREATE DASHBOARD` (dashboards); for managed
-  files `READY TO APPLY` / `READY TO APPLY — NO BASE`; or for declared
+  files `READY TO APPLY` / `READY TO APPLY — NO BASE`; or for allowlisted
   Lovelace resources `READY TO APPLY — CREATE RESOURCE`.
 - Managed files that already match GitHub/HA but lack a base are
   `IN SYNC — BASE NOT INITIALIZED`; **Initialize managed-file bases** only

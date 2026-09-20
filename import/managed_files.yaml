@@ -19,8 +19,8 @@ managed_files:
 
 # After a verified Apply, Import updates the matching Lovelace resource URL
   # to /local/...?v=<content-hash>. It does not write .storage.
-  # Declared `resources` below are created via lovelace/resources/create when
-  # missing; cache-bust still only updates an existing resource_id.
+  # Missing resources for allowlisted frontend modules are offered for explicit
+  # creation via lovelace/resources/create in the same review.
   - path: www/temperature-card.mjs
     profile: frontend_module
     resource_url: /local/temperature-card.mjs
@@ -36,9 +36,4 @@ managed_files:
       - .js
       - .mjs
     profile: frontend_module
-
-# Explicit Lovelace resource desired state. Not inferred from managed files or
-# custom:* cards. The data repository cannot expand this list.
-resources:
-  - url: /local/dashboard/diagnostyka.mjs
-    type: module
+    cache_bust: content_hash

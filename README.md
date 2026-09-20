@@ -69,26 +69,26 @@ Exact allowlisted files stay in `import/managed_files.yaml`: `packages/temperatu
 Frontend preview staging writes
 `/homeassistant/www/.config-sync-preview/<commit>/…` while preserving directory structure so relative ES module imports resolve. Canonical `www/` paths change only on Apply.
 
-`frontend_module` + `cache_bust: content_hash` — after a successful Managed File
-deploy, Import updates the matching Lovelace resource URL to include a
+All allowlisted `frontend_module` files, including modules discovered under
+`www/dashboard/`, use `cache_bust: content_hash`. After a successful Managed
+File deploy, Import updates the matching Lovelace resource URL to include a
 content-derived version query (`/local/…?v=<sha256-prefix>`). This prevents
 stale browser caches without direct `.storage` access. Import lists and updates
 resources through the Home Assistant WebSocket API. A cache-bust warning does
 not undo the file write. An already open dashboard may still require a normal
 page refresh.
 
-Declared Lovelace resources live in `import/managed_files.yaml`:
-
-```yaml
-resources:
-  - url: /local/dashboard/diagnostyka.mjs
-    type: module
-```
-
-They are not inferred from managed files or `custom:*` cards. Review is
-read-only (`lovelace/resources/list`). Missing → `READY TO APPLY — CREATE RESOURCE`;
+Lovelace resource desired state is derived for every allowlisted
+`frontend_module` that has a `resource_url`. This includes every top-level
+`.js` and `.mjs` dashboard module discovered directly in the App-owned
+`www/dashboard/` prefix, so adding a dashboard module there does not require
+another hardcoded resource entry. Nested modules remain managed dependencies;
+Import does not register them as standalone Lovelace resources.
+Import does not infer resources from `custom:*` cards or paths outside the
+allowlist. Review is read-only (`lovelace/resources/list`). Missing →
+`READY TO APPLY — CREATE RESOURCE`;
 same URL + `module` → `OK`; same URL, other type → `CONFLICT` (no automatic
-change). Apply creates only missing declared resources via
+change). Apply creates only missing allowlisted resources via
 `lovelace/resources/create`, is idempotent, and deletes a resource only if this
 Apply created it and a later step fails.
 
