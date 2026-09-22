@@ -8,7 +8,7 @@ Never copy home snapshots, credentials or identifying logs into this repo/PRs.
 - Run from this root: `./scripts/check` before every commit, plus `git diff --check`.
   This script defines required tools/checks; report failures and skipped checks.
 - For iteration: `python3 -m unittest discover -s tests -p 'test_stage1_security.py'`
-  or the relevant test file; JS: `node --test tests/test_visual_preview.mjs`.
+  or the relevant test file.
 - Versions/dependencies come from App `config.yaml` and Dockerfiles. Do not
   duplicate them here. Docs-only changes need no bump, HA access or deployment.
 
@@ -22,7 +22,7 @@ Use sections of [README](README.md), not the entire project history:
 | Export/sanitization | Stage 1 inventory and safety contract |
 | Analysis and policy | [STAGE2.md](STAGE2.md) |
 | Import/Apply | Import source revision; Canonical vs feature deployments; Managed files and frontend modules |
-| Preview UI | Visual dashboard preview (Import) |
+| Import review UI | Import review UI |
 | Release/installation | Development workflow; Add to Home Assistant |
 
 For house-specific work also read the workspace instructions and
@@ -45,8 +45,8 @@ Standalone code checks must not depend on private sibling files.
   scripts and scenes do not imply Apply support.
 - Verified dashboard Apply requests Export once; blocked/failed Apply and
   managed-file-only Apply do not. Discover installation IDs, never hard-code.
-- Preview frames remain non-interactive/read-only. Rendering failure must not
-  block the original diff or Apply, and preview copies must not mutate inputs.
+- Keep item status and reviewed commit visible, and require an explicit selection
+  before Apply. Security warnings remain individually selected, outside bulk selection.
 - Preserve identical security/provenance modules across App build contexts;
   `scripts/check` enforces the mirrors. Add regression tests at changed boundaries.
 

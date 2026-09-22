@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -123,6 +124,36 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         app = self.app_module
         return app.app.test_client().post('/apply', data=self.form,
             environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
+
+    def test_review_bulk_selection_excludes_security_warnings(self):
+        app = self.app_module
+        warning_path = self.repo / 'dashboards/warned-dashboard.json'
+        warning_path.write_text(json.dumps({
+            'views': [{'title': 'Warned'}], 'localKey': 'synthetic',
+        }))
+        bases = {'dashboards': {
+            name: {'sha256': app.digest(self.live)}
+            for name in ('test.json', 'warned-dashboard.json')
+        }}
+        (self.repo / 'state/dashboard-bases.json').write_text(json.dumps(bases))
+
+        html = app.app.test_client().get(
+            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+        ).get_data(as_text=True)
+        safe_input = re.search(r'<input[^>]+name="selected"[^>]+value="test.json"[^>]*>', html)
+        warned_input = re.search(r'<input[^>]+name="selected"[^>]+value="warned-dashboard.json"[^>]*>', html)
+        self.assertIsNotNone(safe_input)
+        self.assertIsNotNone(warned_input)
+        self.assertIn('data-bulk-selectable', safe_input.group())
+        self.assertNotIn('data-bulk-selectable', warned_input.group())
+        self.assertIn('id="select-all-ready"', html)
+        self.assertIn('Items with security warnings need individual selection.', html)
+        self.assertIn('Changed files', html)
+        self.assertNotIn('HA current', html)
+        self.assertNotIn('Review changes', html)
+        self.assertNotIn('class="diff"', html)
+        self.assertNotIn('Generate visual preview', html)
+        self.assertNotIn('visual-preview.mjs', html)
 
     def test_changed_git_after_preview_blocks_apply(self):
         app = self.app_module
