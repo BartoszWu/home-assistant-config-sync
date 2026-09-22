@@ -45,8 +45,8 @@ Standalone code checks must not depend on private sibling files.
   scripts and scenes do not imply Apply support.
 - Verified dashboard Apply requests Export once; blocked/failed Apply and
   managed-file-only Apply do not. Discover installation IDs, never hard-code.
-- Keep the review diff visible and require an explicit selection before Apply.
-  Security warnings must remain individually selected, outside bulk selection.
+- Keep item status and reviewed commit visible, and require an explicit selection
+  before Apply. Security warnings remain individually selected, outside bulk selection.
 - Preserve identical security/provenance modules across App build contexts;
   `scripts/check` enforces the mirrors. Add regression tests at changed boundaries.
 

@@ -148,7 +148,10 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         self.assertNotIn('data-bulk-selectable', warned_input.group())
         self.assertIn('id="select-all-ready"', html)
         self.assertIn('Items with security warnings need individual selection.', html)
-        self.assertIn('HA current', html)
+        self.assertIn('Changed files', html)
+        self.assertNotIn('HA current', html)
+        self.assertNotIn('Review changes', html)
+        self.assertNotIn('class="diff"', html)
         self.assertNotIn('Generate visual preview', html)
         self.assertNotIn('visual-preview.mjs', html)
 

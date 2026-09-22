@@ -123,16 +123,16 @@ while the base is still absent. Import reports
 
 ## Import review UI
 
-Import shows a GitHub-style changed-files list and a side-by-side diff with
-three lines of context. Unchanged files are collapsed. The **Select all ready
-items** checkbox selects eligible dashboards, managed files and Lovelace
-resources together. Items with security warnings still require individual
-selection. **Cancel** clears the selection.
+Import shows changed files with their status, line counts and LIVE provenance.
+Unchanged files are collapsed. The **Select all ready items** checkbox selects
+eligible dashboards, managed files and Lovelace resources together. Items with
+security warnings still require individual selection. Review their content in
+GitHub before selecting them. **Cancel** clears the selection.
 
 Apply remains an explicit action. Import pins the reviewed commit and checks
 both the Git desired hash and current HA state again before writing. It
-verifies the result after Apply. The diff is available without JavaScript;
-JavaScript only adds bulk selection and progress feedback.
+verifies the result after Apply. The item list is available without JavaScript;
+JavaScript adds bulk selection and progress feedback.
 
 ## Repository layout
 

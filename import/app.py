@@ -22,7 +22,6 @@ from dashboard_logic import (
 from diff_view import (
     compare_json,
     file_anchor,
-    hunk_rows,
     is_changed_review,
     json_lines,
     summarize_changed_files,
@@ -133,15 +132,6 @@ button[disabled] { opacity:.45; cursor:not-allowed; }
 input[type=checkbox] { transform:scale(1.25); }
 details { margin-top:14px; }
 summary { cursor:pointer; font-weight:650; }
-.diff-wrap { margin-top:10px; overflow:auto; border:1px solid #d9dde1; border-radius:8px; max-height:650px; }
-table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; background:#fbfbfb; color:#202124; }
-.diff th { position:sticky; top:0; z-index:1; background:#edf1f4; text-align:left; padding:8px; }
-.diff td { vertical-align:top; white-space:pre-wrap; overflow-wrap:anywhere; border-top:1px solid #eceff1; }
-.ln { width:42px; text-align:right; padding:2px 7px; color:#8a929a; user-select:none; background:#f4f6f8; }
-.code { padding:2px 8px; }
-.left-del,.right-add { background:#ffe5e5; }
-.right-add { background:#dcf8e3; }
-.blank { background:#f6f7f8; }
 .card[id] { scroll-margin-top: 16px; }
 .counts { margin-left:auto; font-size:13px; color:var(--muted-color); }
 .counts .add { color:#1a7f37; font-weight:650; }
@@ -151,8 +141,6 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 .file-list a { display:flex; gap:12px; align-items:center; flex-wrap:nowrap; padding:10px 0; text-decoration:none; color:inherit; border-bottom:1px solid #eceff1; }
 .file-list a:hover { background:#eef3f7; }
 .file-list .path { font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.diff-gap td { text-align:center; background:#f0f4f8; color:#57606a; font-size:12px; padding:6px 8px; }
-.diff-hunk td { background:#ddf4ff; color:#0550ae; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; padding:4px 8px; text-align:left; }
 .unchanged-files { margin-top:20px; }
 .bulk-select { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .bulk-select label { display:flex; align-items:center; gap:10px; font-weight:650; cursor:pointer; }
@@ -182,17 +170,11 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
     --result-bad-background:#57272a; --result-bad-text:#ffd6d6;
     --reason-background:#5b4811; --reason-text:#fff0c2;
   }
-  table.diff { background:#171a1e; color:#e8eaed; }
-  .diff th,.ln { background:#252a2f; }
-  .diff td { border-color:#30353a; }
-  .left-del { background:#57272a; } .right-add { background:#1f5130; } .blank { background:#202428; }
   .file-list { border-color:#30353a; }
   .file-list a { border-color:#30353a; }
   .file-list a:hover { background:#252a2f; }
   .counts .add { color:#3fb950; }
   .counts .del { color:#f85149; }
-  .diff-gap td { background:#252a2f; color:#aab0b6; }
-  .diff-hunk td { background:#1c3d5a; color:#79c0ff; }
   .refresh-progress { background:rgba(0,0,0,.48); }
 }
 </style>
@@ -286,39 +268,6 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 </section>
 {% endif %}
 
-{% macro render_diff(change) -%}
-<div class="diff-wrap">
-  {% if not change.diff or not change.diff.blocks %}
-    <p class="small" style="margin:12px">No line changes.</p>
-  {% else %}
-  <table class="diff">
-    <colgroup>
-      <col class="ln">
-      <col>
-      <col class="ln">
-      <col>
-    </colgroup>
-    <thead><tr><th colspan="2">HA current</th><th colspan="2">Git {{ git_source.short_sha if git_source else 'source' }}</th></tr></thead>
-    <tbody>
-    {% for block in change.diff.blocks %}
-      {% if block.type == "gap" %}
-        <tr class="diff-gap"><td colspan="2">{{ block.count }} unchanged line{% if block.count != 1 %}s{% endif %}</td><td colspan="2">{{ block.count }} unchanged line{% if block.count != 1 %}s{% endif %}</td></tr>
-      {% else %}
-        <tr class="diff-hunk"><td colspan="2">{{ block.header }}</td><td colspan="2">{{ block.header }}</td></tr>
-        {% for row in block.rows %}
-        <tr>
-          <td class="ln {{ row.left_css }}">{{ row.left_no or '' }}</td><td class="code {{ row.left_css }}">{{ row.left }}</td>
-          <td class="ln {{ row.right_css }}">{{ row.right_no or '' }}</td><td class="code {{ row.right_css }}">{{ row.right }}</td>
-        </tr>
-        {% endfor %}
-      {% endif %}
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-</div>
-{%- endmacro %}
-
 {% macro dashboard_card(change) -%}
 <section class="card" id="{{ change.anchor }}">
   <div class="change-head">
@@ -334,14 +283,10 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
-  <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
-    {% for warning in change.warnings %}<br>{% if warning.line %}Line {{ warning.line }}: {% endif %}{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
+  <p class="reason">Security scan warning — this does not block Apply. Review the flagged content in GitHub, then select manually if you still want Git → HA.
+    {% for warning in change.warnings %}<br>{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
   </p>
   {% endif %}
-  <details {% if change.status != 'SAME' %}open{% endif %}>
-    <summary>Review changes</summary>
-    {{ render_diff(change)|safe }}
-  </details>
 </section>
 {%- endmacro %}
 
@@ -360,8 +305,8 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
   {% if change.warnings %}
-  <p class="reason">Security scan warning — this does not block Apply. Review the flagged lines, then select manually if you still want Git → HA.
-    {% for warning in change.warnings %}<br>{% if warning.line %}Line {{ warning.line }}: {% endif %}{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
+  <p class="reason">Security scan warning — this does not block Apply. Review the flagged content in GitHub, then select manually if you still want Git → HA.
+    {% for warning in change.warnings %}<br>{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
   </p>
   {% endif %}
   {% if change.staging and change.staging.preview_url %}
@@ -370,10 +315,6 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   {% if change.staging and change.staging.error %}
   <p class="reason">Staging unavailable: {{ change.staging.error }}</p>
   {% endif %}
-  <details {% if change.status != 'SAME' %}open{% endif %}>
-    <summary>Review changes</summary>
-    {{ render_diff(change)|safe }}
-  </details>
 </section>
 {%- endmacro %}
 
@@ -390,10 +331,6 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   </div>
   <div class="small">Lovelace resource · type <code>{{ change.resource_type }}</code> · review {{ git_source.short_sha if git_source else '-' }}</div>
   {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
-  <details {% if change.status != 'OK' %}open{% endif %}>
-    <summary>Review changes</summary>
-    {{ render_diff(change)|safe }}
-  </details>
 </section>
 {%- endmacro %}
 
@@ -417,8 +354,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <nav class="card files-changed" aria-label="Changed files">
   <h2>Changed files</h2>
   <p class="small">{{ file_summary.count }} file{% if file_summary.count != 1 %}s{% endif %}
-    · <span class="counts"><span class="add">+{{ file_summary.added }}</span> · <span class="del">−{{ file_summary.removed }}</span></span>
-    · hunks with 3 lines of context, like GitHub</p>
+    · <span class="counts"><span class="add">+{{ file_summary.added }}</span> · <span class="del">−{{ file_summary.removed }}</span></span></p>
   <ul class="file-list">
     {% for item in file_summary.files %}
     <li>
@@ -781,18 +717,11 @@ def pretty_lines(value):
     return json_lines(value)
 
 
-def side_by_side(current, github):
-    diff = compare_json(current, github)
-    return hunk_rows(diff), diff["added"], diff["removed"]
-
-
 def dashboard_review_fields(relative, current, github):
     diff = compare_json(current, github)
     return {
         "kind": "dashboard",
         "anchor": file_anchor("dashboard", relative),
-        "diff": diff,
-        "rows": hunk_rows(diff),
         "added": diff["added"],
         "removed": diff["removed"],
     }
@@ -927,7 +856,7 @@ def public_managed_change(change):
     """Drop in-memory blobs before template render."""
     return {
         key: value for key, value in change.items()
-        if key not in {"github_data"}
+        if key not in {"github_data", "diff", "rows"}
     }
 
 
@@ -1014,6 +943,9 @@ def render_review(results=None, *, source=None, pin_sha=None):
                     resource_changes = collect_resource_changes(
                         MANAGED_POLICY, ha_ws_call, entries
                     )
+                    resource_changes = [
+                        public_managed_change(item) for item in resource_changes
+                    ]
                 except Exception as exception:
                     resource_error = str(exception)
         except InvalidSourceRef as exception:
@@ -1247,8 +1179,8 @@ def apply_selected():
                         results.append({
                             "ok": False,
                             "message": (
-                                f"{relative}: HA or Git desired changed since preview. "
-                                "Refresh and review the new diff before Apply."
+                                f"{relative}: HA or Git desired changed since review. "
+                                "Refresh and review the updated items before Apply."
                             ),
                         })
                         continue
