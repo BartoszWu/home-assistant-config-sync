@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import subprocess
@@ -62,12 +61,9 @@ from managed_files import (
     validate_policy_path,
 )
 from review_warnings import format_scan_warnings
-from visual_preview import prepare_preview
 
 
 app = Flask(__name__)
-VISUAL_PREVIEW_ASSET = Path(__file__).with_name("static") / "visual-preview.mjs"
-VISUAL_PREVIEW_VERSION = hashlib.sha256(VISUAL_PREVIEW_ASSET.read_bytes()).hexdigest()[:12]
 
 REPO = "ssh://git@ssh.github.com:443/BartoszWu/home-assistant-config.git"
 DEFAULT_BRANCH = DEFAULT_SOURCE_REF
@@ -158,13 +154,9 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 .diff-gap td { text-align:center; background:#f0f4f8; color:#57606a; font-size:12px; padding:6px 8px; }
 .diff-hunk td { background:#ddf4ff; color:#0550ae; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; padding:4px 8px; text-align:left; }
 .unchanged-files { margin-top:20px; }
+.bulk-select { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.bulk-select label { display:flex; align-items:center; gap:10px; font-weight:650; cursor:pointer; }
 .actions { position:sticky; bottom:0; display:flex; gap:8px; justify-content:flex-end; padding-top:12px; }
-.preview-tabs { display:flex; gap:8px; margin:12px 0; }
-.preview-tabs button[aria-selected="false"] { background:#687078; }
-.preview-pair { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; }
-.preview-viewport { position:relative; overflow:hidden; background:#f4f6f8; }
-.preview-viewport iframe { position:absolute; top:0; left:0; border:0; transform-origin:top left; pointer-events:none; }
-.preview-viewport::after { content:""; position:absolute; inset:0; }
 [hidden] { display:none !important; }
 .apply-progress { display:none; align-items:center; gap:9px; margin-right:12px; padding:9px 12px; border-radius:8px; background:#e3f2fd; color:#174f78; font-weight:650; }
 .apply-progress.visible { display:flex; }
@@ -201,7 +193,6 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   .counts .del { color:#f85149; }
   .diff-gap td { background:#252a2f; color:#aab0b6; }
   .diff-hunk td { background:#1c3d5a; color:#79c0ff; }
-  .preview-viewport { background:#1a1e22; }
   .refresh-progress { background:rgba(0,0,0,.48); }
 }
 </style>
@@ -221,7 +212,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 
 <section class="card" id="source">
   <h2 style="margin-top:0">Source</h2>
-  <p class="small">Default is <code>main</code>. Choosing a feature branch does not merge, does not push, and does not change the saved default. Preview and Apply use one pinned commit SHA.</p>
+  <p class="small">Default is <code>main</code>. Choosing a feature branch does not merge, does not push, and does not change the saved default. Review and Apply use one pinned commit SHA.</p>
   <form id="source-form" method="get" class="source-form">
     <label>Branch
       <select name="source" aria-label="Source branch">
@@ -332,9 +323,9 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <section class="card" id="{{ change.anchor }}">
   <div class="change-head">
     {% if change.selectable %}
-    <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}">
+    <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}" {% if not change.warnings %}data-bulk-selectable{% endif %}>
     <input type="hidden" name="preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
-      <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
+    <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
     <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
     <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
@@ -349,28 +340,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
   {% endif %}
   <details {% if change.status != 'SAME' %}open{% endif %}>
     <summary>Review changes</summary>
-    {% if change.visual %}
-    <div class="visual-review">
-      <script type="application/json" class="preview-data">{{ change.visual | tojson }}</script>
-      <div class="preview-tabs" role="tablist" aria-label="Preview {{ change.name }}">
-        <button type="button" role="tab" aria-selected="false" data-preview-tab="visual">Visual</button>
-        <button type="button" role="tab" aria-selected="true" data-preview-tab="yaml">YAML diff</button>
-      </div>
-      <div class="visual-panel" role="tabpanel" hidden>
-        <p class="small">Native HA frontend · first view · read-only · states at render time</p>
-        {% if change.visual.placeholder_types %}
-        <p class="reason">Partial preview — custom cards replaced with placeholders.
-          Before: {{ change.visual.placeholder_counts.before }} · After: {{ change.visual.placeholder_counts.after }}.
-          Types: {{ change.visual.placeholder_types | join(', ') }}.
-          Layout is approximate. YAML diff and Apply use the original configuration.</p>
-        {% endif %}
-        <button type="button" class="preview-load">Generate visual preview</button>
-        <p class="preview-status" role="status" aria-live="polite"></p>
-        <div class="preview-renders"></div>
-      </div>
-    </div>
-    {% endif %}
-    <div class="yaml-panel">{{ render_diff(change)|safe }}</div>
+    {{ render_diff(change)|safe }}
   </details>
 </section>
 {%- endmacro %}
@@ -379,7 +349,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <section class="card" id="{{ change.anchor }}">
   <div class="change-head">
     {% if change.selectable %}
-    <input type="checkbox" name="managed_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
+    <input type="checkbox" name="managed_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}" {% if not change.warnings %}data-bulk-selectable{% endif %}>
     <input type="hidden" name="managed_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
     <input type="hidden" name="managed_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
@@ -411,7 +381,7 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <section class="card" id="{{ change.anchor }}">
   <div class="change-head">
     {% if change.selectable %}
-    <input type="checkbox" name="resource_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}">
+    <input type="checkbox" name="resource_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}" data-bulk-selectable>
     <input type="hidden" name="resource_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
     <input type="hidden" name="resource_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
     {% endif %}
@@ -436,6 +406,13 @@ table.diff { width:100%; border-collapse:collapse; table-layout:fixed; font:12px
 <input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">
 {% endif %}
 {% if not changes and not managed_changes and not resource_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code>, managed files listed in Import policy, or declared Lovelace resources.</p></div>{% endif %}
+{% if has_ready %}
+<div class="card bulk-select" id="bulk-select" hidden>
+  <label for="select-all-ready"><input id="select-all-ready" type="checkbox">Select all ready items</label>
+  <span id="selection-count" class="small" role="status" aria-live="polite"></span>
+  <span class="small">Items with security warnings need individual selection.</span>
+</div>
+{% endif %}
 {% if file_summary.count %}
 <nav class="card files-changed" aria-label="Changed files">
   <h2>Changed files</h2>
@@ -514,7 +491,7 @@ function markPageBusy(message) {
     if (label && message) label.textContent = message;
     progress.classList.add('visible');
   }
-  ['refresh-button', 'refresh-source-button', 'apply-button', 'cancel-button'].forEach(id => {
+  ['refresh-button', 'refresh-source-button', 'apply-button', 'cancel-button', 'select-all-ready'].forEach(id => {
     const button = document.getElementById(id);
     if (button) button.disabled = true;
   });
@@ -543,6 +520,33 @@ bindBusySubmit(document.getElementById('source-form'), 'Refreshing source…');
 
 const form = document.getElementById('apply-form');
 if (form) {
+  const selectable = [...form.querySelectorAll('input[data-bulk-selectable]')];
+  const selectionInputs = [...form.querySelectorAll('input[name="selected"], input[name="managed_selected"], input[name="resource_selected"]')];
+  const bulkSelect = document.getElementById('bulk-select');
+  const selectAll = document.getElementById('select-all-ready');
+  const selectionCount = document.getElementById('selection-count');
+  function updateSelection() {
+    if (selectAll) {
+      const checked = selectable.filter(input => input.checked).length;
+      selectAll.checked = selectable.length > 0 && checked === selectable.length;
+      selectAll.indeterminate = checked > 0 && checked < selectable.length;
+      selectAll.disabled = selectable.length === 0 || pageIsBusy();
+    }
+    if (selectionCount) {
+      const checked = selectionInputs.filter(input => input.checked).length;
+      selectionCount.textContent = `${checked} selected · ${selectable.length} ready for bulk selection`;
+    }
+  }
+  if (selectAll) {
+    selectAll.addEventListener('change', () => {
+      selectable.forEach(input => { input.checked = selectAll.checked; });
+      updateSelection();
+    });
+  }
+  selectionInputs.forEach(input => input.addEventListener('change', updateSelection));
+  form.addEventListener('reset', () => window.setTimeout(updateSelection, 0));
+  updateSelection();
+  if (bulkSelect) bulkSelect.hidden = false;
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (form.dataset.submitting === 'true' || pageIsBusy()) return;
@@ -555,7 +559,7 @@ if (form) {
     const applyButton = document.getElementById('apply-button');
     applyButton.disabled = true;
     applyButton.textContent = 'Applying…';
-    ['refresh-button', 'refresh-source-button', 'cancel-button'].forEach(id => {
+    ['refresh-button', 'refresh-source-button', 'cancel-button', 'select-all-ready'].forEach(id => {
       const button = document.getElementById(id);
       if (button) button.disabled = true;
     });
@@ -574,7 +578,6 @@ if (sourceSelect) {
   });
 }
 </script>
-<script type="module" src="static/visual-preview.mjs?v={{ visual_preview_version }}"></script>
 </body></html>
 """
 
@@ -875,7 +878,6 @@ def collect_changes(commit_sha="", revision=None):
             pending_adopt.append((relative, digest(current)))
         warnings = format_scan_warnings(github, "\n".join(pretty_lines(github)))
         changes.append({
-            "visual": prepare_preview(relative, current, github, unsafe_reason),
             "name": github_path.stem,
             "relative": relative,
             "github": github,
@@ -1060,7 +1062,6 @@ def render_review(results=None, *, source=None, pin_sha=None):
             change["status"] == MISSING_BASE_STATUS for change in managed_changes
         ),
         results=results or [],
-        visual_preview_version=VISUAL_PREVIEW_VERSION,
     )
 
 
