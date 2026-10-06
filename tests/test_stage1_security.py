@@ -205,6 +205,26 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             self.assertEqual(self.submit().status_code, 400)
             save.assert_not_called()
 
+    def test_shared_apply_works_without_a_flask_request(self):
+        from werkzeug.datastructures import MultiDict
+        app = self.app_module
+        def save(_, value):
+            self.live = copy.deepcopy(value)
+        with patch.object(app, 'save_dashboard', side_effect=save), patch.object(app, 'request_export') as export:
+            result = app.apply_plan(MultiDict(self.form), request_export_after=False)
+        self.assertTrue(result and all(item['ok'] for item in result))
+        self.assertEqual(self.live, self.desired)
+        export.assert_not_called()
+
+    def test_project_ownership_blocks_ordinary_apply_after_restart(self):
+        from project_deployment import Coordinator
+        app = self.app_module
+        coordinator = Coordinator(self.repo / 'jobs')
+        coordinator.claim('demo', 'd' * 32)
+        with patch.object(app, 'COORDINATOR', Coordinator(self.repo / 'jobs')), patch.object(app, 'save_dashboard') as save:
+            self.assertEqual(self.submit().status_code, 409)
+            save.assert_not_called()
+
     def test_main_apply_records_canonical_provenance(self):
         app = self.app_module
         def save(_, value):

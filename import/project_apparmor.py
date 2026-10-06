@@ -1,6 +1,16 @@
-"""Generate the complement of exactly three JDG installer directory names."""
+"""Generate the complement of the exact installer directories of reviewed project profiles."""
 
-NAMES = ("jdg_ksiegowy", ".jdg_ksiegowy-stage", ".jdg_ksiegowy-previous")
+from project_profiles import PROJECTS
+
+NAMES = tuple(
+    name
+    for project in PROJECTS.values()
+    for name in (
+        project.domain,
+        "." + project.domain + "-stage",
+        "." + project.domain + "-previous",
+    )
+)
 
 
 def denied_names():

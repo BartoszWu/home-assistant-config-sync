@@ -11,17 +11,34 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
-from jdg_deployment import Deployments, Installer, FILES, unpack, release_set
-from jdg_apparmor import NAMES, denied_names
+from project_deployment import (
+    Deployments,
+    Installer,
+    Coordinator,
+    unpack as unpack_project,
+    release_set as release_project,
+)
+from project_profiles import JDG, JDG_FILES as FILES
 
 
-def archive(version="0.7.0", extra=None):
+def unpack(data, checksum, version):
+    return unpack_project(data, checksum, version, JDG)
+
+
+def release_set(value):
+    return release_project(value, JDG)
+
+
+from project_apparmor import NAMES, denied_names
+
+
+def archive(version="0.7.0", extra=None, project=JDG):
     data = io.BytesIO()
     with zipfile.ZipFile(data, "w") as zipped:
-        for name in FILES:
+        for name in project.files:
             content = (
                 json.dumps(
-                    {"domain": "jdg_ksiegowy", "version": version, "requirements": []}
+                    {"domain": project.domain, "version": version, "requirements": []}
                 ).encode()
                 if name == "manifest.json"
                 else b"synthetic"
@@ -36,8 +53,11 @@ def archive(version="0.7.0", extra=None):
 class FakeBackend:
     def __init__(self):
         self.active = {"sha": "a" * 40, "healthy": True, "version": "0.1.0"}
-        self.target = {"version": "0.2.0", "sha": "b" * 40}
+        self.target = {"version": "0.3.0", "sha": "b" * 40}
         self.calls = []
+
+    def integration(self, backend_release, integration_version):
+        return archive(integration_version)
 
     def request(self, path, value=None):
         self.calls.append((path, value))
@@ -57,8 +77,9 @@ class DeploymentTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.installer = Installer(self.root)
+        self.installer = Installer(self.root, JDG)
         self.backend = FakeBackend()
+        self.coordinator = Coordinator(self.root / "data")
         self.events = []
         self.fail_dashboard = False
         self.deployment = Deployments(
@@ -66,8 +87,16 @@ class DeploymentTest(unittest.TestCase):
             self.installer,
             self.backend,
             self.ha,
-            self.dashboard,
-            downloader=lambda _: archive(),
+            type(
+                "Dashboard",
+                (),
+                {
+                    "apply": lambda _, job, save: self.dashboard(job),
+                    "finish": lambda *args: None,
+                },
+            )(),
+            JDG,
+            self.coordinator,
             sleep=lambda _: None,
         )
         # Drive the durable worker deterministically, without network or HA.
@@ -86,8 +115,9 @@ class DeploymentTest(unittest.TestCase):
     def review(self):
         return self.deployment.review(
             {
-                "schema_version": 1,
-                "backend_version": "0.2.0",
+                "schema_version": 2,
+                "project": "jdg",
+                "backend_version": "0.3.0",
                 "integration_version": "0.7.0",
             },
             "c" * 40,
@@ -143,7 +173,13 @@ class DeploymentTest(unittest.TestCase):
         self.assertEqual(self.deployment.read()["status"], "failed")
         # Recreate the process, preserving only persisted state.
         recovered = Deployments(
-            self.root / "data", self.installer, self.backend, self.ha, self.dashboard
+            self.root / "data",
+            self.installer,
+            self.backend,
+            self.ha,
+            self.deployment.dashboard,
+            JDG,
+            self.coordinator,
         )
         recovered.launch = lambda: None
         self.fail_dashboard = False
@@ -187,7 +223,8 @@ class DeploymentTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             release_set(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
+                    "project": "jdg",
                     "backend_version": "0.1.0",
                     "integration_version": "0.6.2",
                 }

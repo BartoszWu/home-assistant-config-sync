@@ -33,14 +33,19 @@ Standalone code checks must not depend on private sibling files.
 
 - Export owns the GitHub write key, with no UI. Import has a distinct read-only
   key and Ingress-only UI. Never weaken the Ingress check or print secrets.
-- No `.storage` access or broader host mounts. The explicitly reviewed JDG
-  deployment is the only exception to code installation and Core restart:
-  install only the fixed JDG release archive into `custom_components/jdg_ksiegowy`
-  (with fixed staging/previous directories); restart only within its approved,
-  persisted plan after HA backup. HACS takeover may unregister only the JDG repo,
+- No `.storage` access or broader host mounts. Reviewed profiles in
+  `import/project_profiles.py` authorize code installation only in their exact
+  integration/staging/previous directories; `project_apparmor.py` derives the
+  permission policy. Currently JDG is the only production profile. Git selects
+  versions, not privileges. Restart only within an approved persisted plan after
+  HA backup, with shared durable ownership across projects and ordinary Apply.
+  HACS takeover may unregister only the profile’s exact legacy repo,
   never uninstall it. Ordinary managed-file allowlists remain in App code and
   must reject all `custom_components` paths. Preserve guards and AppArmor;
   synthetic fixtures only.
+- For project profiles, executor contracts or recovery, read README →
+  “Import projektów z backendem na serwerze”. Keep per-project state and pinned
+  profile identity; complete approved jobs before changing their profiles.
 - Apply requires explicit UI approval, immutable reviewed SHA, fresh conflict
   check, atomic writes/rollback and read-back. Feature LIVE must never be
   exported as canonical main. Missing/corrupt provenance after initialization

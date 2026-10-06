@@ -15,7 +15,10 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
 try:
     from flask import Flask
-    from jdg_ui import register
+    from project_ui import register
+    from project_deployment import Coordinator
+    from project_profiles import JDG
+    from dashboard_sync import DashboardSync
     from git_source import SourceRevision
     from dashboard_logic import digest
 except ImportError:
@@ -40,8 +43,9 @@ class UI(unittest.TestCase):
         (self.root / "deployments/jdg.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
-                    "backend_version": "0.2.0",
+                    "schema_version": 2,
+                    "project": "jdg",
+                    "backend_version": "0.3.0",
                     "integration_version": "0.7.0",
                 }
             )
@@ -77,63 +81,62 @@ class UI(unittest.TestCase):
             },
         }
         self.live_dashboard = {"old": True}
-        self.host = SimpleNamespace(
-            REPO_LOCK=threading.RLock(),
-            WORKDIR=self.root,
-            HA_CONFIG_ROOT=self.root,
-            MANAGED_POLICY=object(),
-            unsafe_reason=lambda _: None,
-            coerce_revision=lambda value, _: value,
-            refresh_repo=lambda *_, **__: SourceRevision(
-                "main", "branch", self.sha, self.sha[:7], ("main",)
-            ),
-            managed_entries_for_revision=lambda: [
-                SimpleNamespace(path="www/dashboard/faktury.mjs")
-            ],
-            collect_managed_changes=lambda *_, **__: (
-                [copy.deepcopy(self.items["managed"])],
-                {},
-            ),
-            collect_changes=lambda **_: [copy.deepcopy(self.items["dashboard"])],
-            collect_resource_changes=lambda *_, **__: [
-                copy.deepcopy(self.items["resource"])
-            ],
-            ha_ws_call=self.ws,
-            ha_dashboard_config=lambda _: self.live_dashboard,
-            digest=digest,
-            apply_selected=self.apply,
-            live_provenance_store=lambda: SimpleNamespace(
-                dashboards={
-                    "dashboard-faktury.json": SimpleNamespace(
-                        canonical=True,
-                        commit_sha=self.sha,
-                        content_hash=self.items["dashboard"]["preview_ha_hash"],
-                    )
-                },
-                managed_files={
-                    "www/dashboard/faktury.mjs": SimpleNamespace(
-                        canonical=True,
-                        commit_sha=self.sha,
-                        content_hash=self.items["managed"]["preview_ha_hash"],
-                    )
-                },
-            ),
-            request_export=lambda dashboards: self.actions.append(
-                ("export", dashboards)
-            ),
-        )
+
+        class Access:
+            provenance_available = True
+
+            def review(inner, project, sha=None):
+                self.assertTrue(sha in (None, self.sha))
+                revision = SourceRevision(
+                    "main", "branch", self.sha, self.sha[:7], ("main",)
+                )
+                releases = json.loads((self.root / "deployments/jdg.json").read_text())
+                return (
+                    revision,
+                    releases,
+                    [
+                        {**copy.deepcopy(item), "kind": kind}
+                        for kind, item in self.items.items()
+                    ],
+                )
+
+            def read(inner, kind, relative):
+                if kind == "dashboard":
+                    return digest(self.live_dashboard)
+                if kind == "managed":
+                    return hashlib.sha256(self.bundle.read_bytes()).hexdigest()
+                return self.items[kind]["preview_ha_hash"]
+
+            def provenance(inner, kind, relative):
+                if not inner.provenance_available:
+                    return None
+                return SimpleNamespace(
+                    canonical=True,
+                    commit_sha=self.sha,
+                    content_hash=self.items[kind]["preview_ha_hash"],
+                )
+
+            def apply(inner, form, owner):
+                self.assertEqual(owner, ("jdg", self.manager().read()["id"]))
+                self.assertEqual(form["reviewed_sha"], [self.sha])
+                return self.apply()
+
+            def export(inner, dashboards):
+                self.actions.append(("export", dashboards))
+
+        self.access = Access()
         self.app = Flask(__name__)
-        with (
-            patch("jdg_ui.Backend", return_value=self.backend),
-            patch(
-                "jdg_deployment.download_integration", side_effect=lambda _: archive()
-            ),
-        ):
-            # Constructor default is a function object, so patch the manager's downloader below.
-            self.manager = register(
-                self.app, self.host, self.config, self.root / "data"
-            )
-            self.manager().downloader = lambda _: archive()
+        manager = register(
+            self.app,
+            DashboardSync(self.access),
+            self.ws,
+            self.root,
+            Coordinator(self.root / "data"),
+            config_directory=self.root,
+            directory=self.root / "data",
+            backend_factory=lambda _: self.backend,
+        )
+        self.manager = lambda: manager("jdg")
         self.client = self.app.test_client()
 
     def ws(self, kind, **kwargs):
@@ -194,8 +197,7 @@ class UI(unittest.TestCase):
             }
         raise AssertionError(kind)
 
-    def apply(self, **kwargs):
-        self.assertEqual(kwargs, {"jdg_job": True, "request_export_after": False})
+    def apply(self):
         self.live_dashboard = {"new": True}
         self.bundle.write_bytes(b"new")
         for item in self.items.values():
@@ -203,16 +205,17 @@ class UI(unittest.TestCase):
         return [{"ok": True}]
 
     def test_complete_review_approval_and_readback(self):
-        response = self.client.post("/jdg/review")
+        response = self.client.post("/projects/jdg/review")
         self.assertEqual(response.status_code, 303)
         job = self.manager().read()
-        html = self.client.get("/jdg/").get_data(as_text=True)
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
         self.assertIn("Importuj JDG", html)
-        self.assertIn("0.2.0", html)
+        self.assertIn("0.3.0", html)
         self.assertNotIn("backend_url", html)
         self.assertFalse(self.manager().installer.target.exists())
         response = self.client.post(
-            "/jdg/start", data={"id": job["id"], "review_hash": job["review_hash"]}
+            "/projects/jdg/start",
+            data={"id": job["id"], "review_hash": job["review_hash"]},
         )
         self.assertEqual(response.status_code, 303)
         for _ in range(100):
@@ -237,12 +240,12 @@ class UI(unittest.TestCase):
 
     def test_warnings_block_shortcut_without_writes(self):
         self.items["dashboard"]["warnings"] = [{"reason": "synthetic warning"}]
-        self.assertEqual(self.client.post("/jdg/review").status_code, 409)
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 409)
         self.assertIsNone(self.manager().read())
         self.assertFalse(any(kind == "call_service" for kind, _ in self.actions))
 
     def test_failed_backup_does_not_start_backend(self):
-        self.assertEqual(self.client.post("/jdg/review").status_code, 303)
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
         job = self.manager().read()
         self.manager().ha = lambda action, _: (
             (_ for _ in ()).throw(ValueError("backup failed"))
@@ -256,13 +259,35 @@ class UI(unittest.TestCase):
         self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
 
     def test_missing_provenance_blocks_completion_and_export(self):
-        self.assertEqual(self.client.post("/jdg/review").status_code, 303)
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
         job = self.manager().read()
-        self.host.live_provenance_store = lambda: SimpleNamespace(
-            dashboards={}, managed_files={}
-        )
+        self.access.provenance_available = False
         self.manager().launch = lambda: None
         self.manager().approve(job["id"], job["review_hash"])
         self.manager().run()
         self.assertEqual(self.manager().read()["status"], "failed")
         self.assertFalse(any(kind == "export" for kind, _ in self.actions))
+
+    def test_catalog_and_routes_accept_another_reviewed_profile(self):
+        from test_projects import OTHER
+
+        app = Flask("synthetic-catalog")
+        register(
+            app,
+            DashboardSync(self.access),
+            self.ws,
+            self.root,
+            Coordinator(self.root / "other-state"),
+            config_directory=self.root,
+            directory=self.root / "other-state",
+            projects={"jdg": JDG, "demo": OTHER},
+            backend_factory=lambda _: self.backend,
+        )
+        client = app.test_client()
+        catalog = client.get("/projects/").get_data(as_text=True)
+        self.assertIn('href="demo/"', catalog)
+        self.assertIn(OTHER.title, catalog)
+        self.assertIn(OTHER.title, client.get("/projects/demo/").get_data(as_text=True))
+        self.assertEqual(client.get("/projects/unknown/").status_code, 404)
+        self.assertEqual(client.post("/projects/unknown/start").status_code, 404)
+        self.assertEqual(client.get("/jdg/").status_code, 302)

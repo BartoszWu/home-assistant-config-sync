@@ -1,5 +1,6 @@
-"""One durable, reviewed JDG deployment. Ordinary managed-file policy stays unchanged."""
+"""Durable reviewed project deployment. Ordinary managed-file policy stays unchanged."""
 
+import base64
 import hashlib
 import io
 import json
@@ -11,33 +12,13 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
-DOMAIN = "jdg_ksiegowy"
 VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
-FILES = frozenset(
-    {
-        "__init__.py",
-        "binary_sensor.py",
-        "button.py",
-        "client.py",
-        "config_flow.py",
-        "const.py",
-        "entity.py",
-        "local.py",
-        "manifest.json",
-        "review.py",
-        "sensor.py",
-        "strings.json",
-        "translations/en.json",
-        "translations/pl.json",
-        "websocket.py",
-        "version.py",
-    }
-)
 MAX_ARCHIVE = 2 * 1024 * 1024
 
 
@@ -63,26 +44,30 @@ def atomic_json(path, value):
         os.close(descriptor)
 
 
-def release_set(value):
+def release_set(value, project):
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema_version", "backend_version", "integration_version"}
-        or value["schema_version"] != 1
+        or set(value)
+        != {"schema_version", "project", "backend_version", "integration_version"}
+        or value["schema_version"] != 2
+        or value["project"] != project.id
     ):
-        raise ValueError("Nieprawidłowy zestaw wydań JDG")
+        raise ValueError("Nieprawidłowy zestaw wydań projektu")
     if any(
         not isinstance(value[k], str) or not VERSION.fullmatch(value[k])
         for k in ("backend_version", "integration_version")
     ):
-        raise ValueError("Nieprawidłowa wersja JDG")
-    if tuple(map(int, value["backend_version"].split("."))) < (0, 2, 0) or tuple(
-        map(int, value["integration_version"].split("."))
-    ) < (0, 7, 0):
-        raise ValueError("Wydania nie obsługują wspólnego importu JDG")
+        raise ValueError("Nieprawidłowa wersja projektu")
+    if (
+        tuple(map(int, value["backend_version"].split("."))) < project.minimum_backend
+        or tuple(map(int, value["integration_version"].split(".")))
+        < project.minimum_integration
+    ):
+        raise ValueError("Wydania nie obsługują wspólnego importu projektu")
     return value
 
 
-def unpack(data, expected_hash, version):
+def unpack(data, expected_hash, version, project):
     if (
         len(data) > MAX_ARCHIVE
         or not HASH.fullmatch(expected_hash)
@@ -96,18 +81,18 @@ def unpack(data, expected_hash, version):
             total += item.file_size
             mode = item.external_attr >> 16
             if (
-                item.filename not in FILES
+                item.filename not in project.files
                 or item.filename in result
                 or stat.S_ISLNK(mode)
                 or total > MAX_ARCHIVE
             ):
                 raise ValueError("Nieprawidłowy plik w paczce integracji")
             result[item.filename] = archive.read(item)
-    if set(result) != FILES:
+    if set(result) != project.files:
         raise ValueError("Niekompletna paczka integracji")
     manifest = json.loads(result["manifest.json"])
     if (
-        manifest.get("domain") != DOMAIN
+        manifest.get("domain") != project.domain
         or manifest.get("version") != version
         or manifest.get("requirements") != []
     ):
@@ -116,11 +101,12 @@ def unpack(data, expected_hash, version):
 
 
 class Installer:
-    def __init__(self, ha_root):
+    def __init__(self, ha_root, project):
+        self.project = project
         self.parent = Path(ha_root) / "custom_components"
-        self.target = self.parent / DOMAIN
-        self.stage = self.parent / ".jdg_ksiegowy-stage"
-        self.previous = self.parent / ".jdg_ksiegowy-previous"
+        self.target = self.parent / project.domain
+        self.stage = self.parent / ("." + project.domain + "-stage")
+        self.previous = self.parent / ("." + project.domain + "-previous")
 
     def snapshot(self, target=None):
         target = self.target if target is None else target
@@ -141,7 +127,7 @@ class Installer:
             if "__pycache__" in path.parts or not path.is_file():
                 continue
             relative = path.relative_to(target).as_posix()
-            if relative not in FILES:
+            if relative not in self.project.files:
                 raise ValueError("Niezarządzany plik w integracji")
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         return digest(files)
@@ -202,7 +188,7 @@ class Installer:
 
 
 class Backend:
-    def __init__(self, config_path=Path("/review/jdg.json")):
+    def __init__(self, config_path):
         config = json.loads(config_path.read_text())
         if set(config) != {"backend_url", "token_file"}:
             raise ValueError("Nieprawidłowa lokalna konfiguracja wykonawcy")
@@ -231,7 +217,7 @@ class Backend:
         if len(self.token) < 32:
             raise ValueError("Brak dedykowanego klucza deploy")
 
-    def request(self, path, value=None):
+    def request(self, path, value=None, *, maximum=65536):
         request = Request(
             self.url + path,
             data=None if value is None else json.dumps(value).encode(),
@@ -248,22 +234,76 @@ class Backend:
                 return None
 
         with build_opener(NoRedirect).open(request, timeout=30) as response:
-            data = response.read(65537)
-            if len(data) > 65536:
+            data = response.read(maximum + 1)
+            if len(data) > maximum:
                 raise ValueError("Nieprawidłowa odpowiedź wykonawcy")
             return json.loads(data)
 
+    def integration(self, backend_release, integration_version):
+        value = self.request(
+            "/integration?version=" + backend_release["version"],
+            maximum=3 * 1024 * 1024,
+        )
+        if (
+            value.get("sha") != backend_release["sha"]
+            or value.get("version") != integration_version
+        ):
+            raise ValueError(
+                "Integration does not belong to the reviewed backend release"
+            )
+        data = base64.b64decode(value["archive"], validate=True)
+        return data, value["sha256"]
 
-def download_integration(version):
-    if not VERSION.fullmatch(version):
-        raise ValueError("Nieprawidłowa wersja integracji")
-    base = f"https://github.com/BartoszWu/ha-jdg-ksiegowy/releases/download/v{version}/"
-    with urlopen(base + "jdg_ksiegowy.sha256", timeout=30) as response:
-        checksum = response.read(66).decode().strip()
-    with urlopen(base + "jdg_ksiegowy.zip", timeout=30) as response:
-        data = response.read(MAX_ARCHIVE + 1)
-    unpack(data, checksum, version)
-    return data, checksum
+
+class DeploymentBusy(ValueError):
+    """Another approved project owns HA mutation privileges."""
+
+
+class Coordinator:
+    """One persistent HA mutation owner across all project workers and ordinary Apply."""
+
+    def __init__(self, directory):
+        self.path = Path(directory) / "owner.json"
+        self.lock = threading.RLock()
+
+    def owner(self):
+        if not self.path.exists():
+            return None
+        owner = json.loads(self.path.read_text())
+        if (
+            not isinstance(owner, dict)
+            or set(owner) != {"project", "id"}
+            or not isinstance(owner["project"], str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]*", owner["project"])
+            or not isinstance(owner["id"], str)
+            or not re.fullmatch(r"[a-f0-9]{32}", owner["id"])
+        ):
+            raise ValueError("Corrupt HA update owner; inspect recovery state")
+        return owner
+
+    def claim(self, project, job_id):
+        with self.lock:
+            expected = {"project": project, "id": job_id}
+            owner = self.owner()
+            if owner is not None and owner != expected:
+                raise ValueError(
+                    "Another project owns the HA update; finish or recover it first"
+                )
+            atomic_json(self.path, expected)
+
+    def release(self, project, job_id):
+        with self.lock:
+            if self.owner() != {"project": project, "id": job_id}:
+                raise ValueError("HA update ownership changed")
+            self.path.unlink()
+
+    @contextmanager
+    def operation(self, project=None, job_id=None):
+        with self.lock:
+            owner = self.owner()
+            if owner is not None and owner != {"project": project, "id": job_id}:
+                raise DeploymentBusy("HA is reserved by an approved project update")
+            yield
 
 
 class Deployments:
@@ -276,22 +316,32 @@ class Deployments:
         backend,
         ha,
         dashboard,
-        downloader=download_integration,
+        project,
+        coordinator,
         sleep=time.sleep,
     ):
-        self.directory = Path(directory)
+        self.directory = Path(directory) / project.id
+        self.project = project
+        self.coordinator = coordinator
         self.installer = installer
         self.backend = backend
         self.ha = ha
         self.dashboard = dashboard
-        self.downloader = downloader
         self.sleep = sleep
         self.lock = threading.RLock()
         self.running = False
 
     def read(self):
         path = self.directory / "job.json"
-        return json.loads(path.read_text()) if path.exists() else None
+        job = json.loads(path.read_text()) if path.exists() else None
+        if job and (
+            job.get("project") != self.project.id
+            or job.get("profile_hash") != digest(self.project.identity())
+        ):
+            raise ValueError(
+                "Stored plan requires its original reviewed project profile"
+            )
+        return job
 
     def save(self, job):
         atomic_json(self.directory / "job.json", job)
@@ -303,9 +353,9 @@ class Deployments:
                 old and old["status"] in ("running", "review", "failed")
             ):
                 raise ValueError(
-                    "Zadanie JDG już istnieje; dokończ je lub anuluj review"
+                    "Zadanie projektu już istnieje; dokończ je lub anuluj review"
                 )
-            release_set(releases)
+            release_set(releases, self.project)
             if not SHA.fullmatch(source_sha):
                 raise ValueError("Nieprawidłowa rewizja dashboardu")
             backend = self.backend.request(
@@ -318,9 +368,13 @@ class Deployments:
             active = self.backend.request("/status")
             if not active.get("healthy") or not SHA.fullmatch(active.get("sha", "")):
                 raise ValueError("Backend nie jest gotowy do aktualizacji")
-            data, checksum = self.downloader(releases["integration_version"])
+            data, checksum = self.backend.integration(
+                backend, releases["integration_version"]
+            )
             job = {
                 "id": uuid.uuid4().hex,
+                "project": self.project.id,
+                "profile_hash": digest(self.project.identity()),
                 "status": "review",
                 "stage": "backup",
                 "releases": releases,
@@ -336,7 +390,9 @@ class Deployments:
             archive = self.directory / "integration.zip"
             archive.write_bytes(data)
             archive.chmod(0o600)
-            files = unpack(data, checksum, releases["integration_version"])
+            files = unpack(
+                data, checksum, releases["integration_version"], self.project
+            )
             job["restart"] = (
                 digest({k: hashlib.sha256(v).hexdigest() for k, v in files.items()})
                 != job["integration_before"]
@@ -373,10 +429,12 @@ class Deployments:
                     or self.backend.request("/status") != job["backend_before"]
                 ):
                     raise ValueError("Stan zmienił się po review")
+                self.coordinator.claim(self.project.id, job["id"])
                 job["status"] = "running"
                 self.save(job)
             elif job["status"] != "running":
                 return job
+            self.coordinator.claim(self.project.id, job["id"])
             self.launch()
             return job
 
@@ -392,10 +450,12 @@ class Deployments:
         self.save(job)
 
     def run(self):
-        job = self.read()
+        job = None
         try:
-            if job["status"] != "running":
+            job = self.read()
+            if not job or job["status"] != "running":
                 return
+            self.coordinator.claim(self.project.id, job["id"])
             if job["stage"] == "backup":
                 self.ha("check", job)
                 self.ha("backup", job)
@@ -416,7 +476,10 @@ class Deployments:
             if job["stage"] == "integration":
                 data = (self.directory / "integration.zip").read_bytes()
                 files = unpack(
-                    data, job["archive_hash"], job["releases"]["integration_version"]
+                    data,
+                    job["archive_hash"],
+                    job["releases"]["integration_version"],
+                    self.project,
                 )
                 self.ha("takeover", job)
                 self.installer.install(files, job["integration_before"])
@@ -427,20 +490,21 @@ class Deployments:
                 if job["restart"]:
                     try:
                         self.ha("restart", job)
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 - Core may close its socket during restart.
                         pass  # Core may close the socket; loaded-version verification decides success.
             if job["stage"] == "wait_ha":
                 for _ in range(120):
                     try:
                         self.ha("verify", job)
                         break
-                    except Exception:
+                    except Exception:  # noqa: BLE001 - preserve durable recovery without leaking errors.
                         self.sleep(5)
                 else:
                     raise TimeoutError("HA nie załadował oczekiwanej integracji")
                 self.advance(job, "dashboard")
             if job["stage"] == "dashboard":
-                self.dashboard(job)
+                with self.coordinator.operation(self.project.id, job["id"]):
+                    self.dashboard.apply(job, self.save)
                 self.advance(job, "verify")
             if job["stage"] == "verify":
                 self.ha("verify", job)
@@ -451,10 +515,14 @@ class Deployments:
                     or active.get("version") != job["backend"]["version"]
                 ):
                     raise ValueError("Nieprawidłowy końcowy stan backendu")
+                self.dashboard.finish(job, self.save)
                 self.installer.finish()
                 job["status"] = "success"
                 self.save(job)
-        except Exception:
+                self.coordinator.release(self.project.id, job["id"])
+        except Exception:  # noqa: BLE001 - preserve durable recovery without leaking errors.
+            if job is None:
+                return
             job["status"] = "failed"
             job["message"] = (
                 "Import przerwany. Zachowano plan i poprzedni kod; sprawdź wskazany etap przed wznowieniem."
@@ -474,6 +542,7 @@ class Deployments:
                 or job["status"] not in ("failed", "running")
             ):
                 raise ValueError("Nie można wznowić tego zadania")
+            self.coordinator.claim(self.project.id, job["id"])
             job["status"] = "running"
             self.save(job)
             self.launch()
@@ -485,3 +554,8 @@ class Deployments:
                 raise ValueError("Można anulować wyłącznie review")
             job["status"] = "cancelled"
             self.save(job)
+            if self.coordinator.owner() == {
+                "project": self.project.id,
+                "id": job["id"],
+            }:
+                self.coordinator.release(self.project.id, job["id"])
