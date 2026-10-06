@@ -225,6 +225,33 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             self.assertEqual(self.submit().status_code, 409)
             save.assert_not_called()
 
+    def test_approved_project_owner_uses_canonical_pin_without_http_context(self):
+        from project_deployment import Coordinator
+        from werkzeug.datastructures import MultiDict
+        app = self.app_module
+        coordinator = Coordinator(self.repo / 'jobs')
+        owner = ('demo', 'd' * 32)
+        coordinator.claim(*owner)
+        def save(_, value):
+            self.live = copy.deepcopy(value)
+        with patch.object(app, 'COORDINATOR', coordinator), patch.object(app, 'save_dashboard', side_effect=save), patch.object(app, 'refresh_repo', return_value=fake_revision(branch_tip_sha='e' * 40)) as refresh:
+            result = app.apply_plan(MultiDict(self.form), request_export_after=False, owner=owner)
+        self.assertTrue(result and all(item['ok'] for item in result))
+        refresh.assert_called_once_with('main', pin_sha=REVIEW_SHA, allow_main_ancestor=True)
+        from deployment_provenance import load_json_store
+        entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
+        self.assertTrue(entry.canonical)
+        self.assertEqual(entry.commit_sha, REVIEW_SHA)
+
+    def test_unclaimed_project_cannot_enable_canonical_ancestor_apply(self):
+        from project_deployment import Coordinator, DeploymentBusy
+        from werkzeug.datastructures import MultiDict
+        app = self.app_module
+        with patch.object(app, 'COORDINATOR', Coordinator(self.repo / 'jobs')), patch.object(app, 'save_dashboard') as save:
+            with self.assertRaises(DeploymentBusy):
+                app.apply_plan(MultiDict(self.form), owner=('demo', 'd' * 32))
+            save.assert_not_called()
+
     def test_main_apply_records_canonical_provenance(self):
         app = self.app_module
         def save(_, value):

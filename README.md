@@ -343,6 +343,11 @@ bez syntetycznego requestu Flask. Zachowane są konflikty, provenance, read-back
 cache bust i rollback. Export jest żądany dopiero po końcowej kontroli backendu,
 załadowanej integracji i wszystkich dashboardów. Niepełny staging, nieznany
 protokół lub uszkodzony właściciel wymagają lokalnej kontroli, a nie nowego planu.
+Zatwierdzony projekt zachowuje dokładny SHA zestawu również wtedy, gdy niezależny
+Export przesunie `main`. Przy każdym odczycie/Apply Git potwierdza, że ten SHA
+nadal jest przodkiem aktualnego `main`; usunięta historia lub obcy commit
+zatrzymują zadanie. Zapis wymaga jego trwałego właściciela, zgodnych hashy
+artefaktów i świeżego stanu HA. Zwykły Apply nadal wymaga niezmienionego HEAD.
 Staging i poprzedni kod są przechowywane w prywatnym katalogu
 `/homeassistant/.config-sync-integrations/<domain>-{stage,previous}`, poza
 `custom_components`: loader HA wykrywa również ukryte katalogi z manifestem.

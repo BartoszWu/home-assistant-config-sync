@@ -176,15 +176,20 @@ def checkout_source(
     runner,
     source_ref: str | None = None,
     pin_sha: str | None = None,
+    allow_main_ancestor: bool = False,
 ) -> SourceRevision:
     """Clone one remote ref into workdir and return the resolved immutable SHA.
 
     When ``pin_sha`` is set for a branch and the remote tip has moved, the new
     tip is checked out and ``stale=True`` is returned so Apply can refuse.
     Explicit commit SHAs are immutable and never become stale.
+    Approved project jobs may set ``allow_main_ancestor`` to keep their exact
+    main pin after an unrelated Export; ancestry is verified against fetched main.
     """
     requested = source_ref or DEFAULT_SOURCE_REF
     pin = validate_commit_sha(pin_sha) if pin_sha else None
+    if allow_main_ancestor and (requested != DEFAULT_SOURCE_REF or not pin):
+        raise InvalidSourceRef("Canonical ancestor requires a pinned main revision.")
     heads = list_remote_heads(repo, runner)
     branches = ordered_branch_names(heads)
 
@@ -207,7 +212,8 @@ def checkout_source(
     workdir.mkdir(parents=True, exist_ok=True)
     runner(["git", "init"], cwd=workdir)
     runner(["git", "remote", "add", "origin", repo], cwd=workdir)
-    runner(["git", "fetch", "--depth", "1", "--no-tags", "origin", fetch_arg], cwd=workdir)
+    depth = [] if allow_main_ancestor else ["--depth", "1"]
+    runner(["git", "fetch", *depth, "--no-tags", "origin", fetch_arg], cwd=workdir)
     runner(
         ["git", "-c", "advice.detachedHead=false", "checkout", "--detach", "FETCH_HEAD"],
         cwd=workdir,
@@ -217,6 +223,16 @@ def checkout_source(
         raise RuntimeError("git rev-parse returned an unexpected revision.")
     if source_kind == SOURCE_KIND_COMMIT and sha != display_ref:
         raise RuntimeError("Checked out SHA does not match the requested commit.")
+
+    if allow_main_ancestor:
+        # A long-running approved project keeps its exact tree despite an
+        # unrelated Export advancing main. Force-pushed/foreign pins fail closed.
+        runner(["git", "merge-base", "--is-ancestor", pin, sha], cwd=workdir)
+        tip = sha
+        runner(["git", "checkout", "--detach", pin], cwd=workdir)
+        sha = runner(["git", "rev-parse", "HEAD"], cwd=workdir)
+        if sha != pin:
+            raise RuntimeError("Canonical checkout does not match the approved pin.")
 
     stale = bool(pin and pin != sha)
     return SourceRevision(
