@@ -261,3 +261,90 @@ report, explainable InfluxDB review candidates, and a small agent summary. User
 InfluxDB decisions live in one private JSON policy; no integration is configured.
 See [Stage 2 contract and offline commands](STAGE2.md) for completeness, baseline,
 revision-aware notifications, candidate review, and runtime-only no-commit behavior.
+
+## Import projektów z backendem na serwerze
+
+Import 0.12.0 udostępnia **Aktualizacje projektów → JDG → Sprawdź aktualizację →
+Importuj JDG**. Wspólny moduł przygotowuje niezmienny plan, wykonuje backup HA,
+aktualizuje backend i integrację, restartuje Core gdy potrzeba, stosuje zestaw
+dashboardów i sprawdza działanie. JDG jest pierwszym profilem; ten sam moduł
+jest testowany także z drugim syntetycznym projektem i inną paczką integracji.
+
+`import/project_profiles.py` określa obsługiwane projekty: domenę, dokładne pliki
+integracji, dashboardy, moduły JS, zasoby i minimalne wersje kontraktu.
+Dodanie projektu wymaga przeglądu profilu i uprawnień App oraz adaptera wykonawcy
+po stronie jego backendu. Git wybiera wersje wyłącznie już obsługiwanych profili;
+nie może dodawać poleceń, repozytoriów ani uprawnień instalacji. Generator
+`project_apparmor.py` wyprowadza dokładne katalogi instalatora z tego rejestru.
+Obecnie produkcyjny rejestr zawiera tylko JDG; zwykłe managed files nadal
+odrzucają wszystkie `custom_components`, pozostałe integracje i `.storage`
+pozostają zablokowane. Pierwsza instalacja backendu/wpisu integracji jest
+bootstrapem, a nie operacją tego modułu aktualizacji.
+
+Wykonawca działa w dedykowanym gościu backendu i posiada własny ograniczony
+GitHub token **Contents: read-only** do prywatnego repo produktu. Źródła integracji
+JDG oraz ZIP i SHA-256 są wydawane w tym samym prywatnym repo co backend.
+Import pobiera paczkę przez uwierzytelniony lokalny `GET /integration?version=...`;
+potwierdza jej powiązanie z SHA wybranego backendu, wersję, checksum i allowlistę
+plików. Import nie potrzebuje klucza do prywatnych Releases i nie pobiera kodu
+z dawnego publicznego repo integracji. Wykonawca nie przyjmuje dowolnych poleceń,
+ścieżek, repozytoriów ani URL-i. Każdy projekt może używać osobnego wykonawcy,
+klucza i sposobu uruchamiania; wspólny jest interface aktualizacji.
+
+Jednorazowo zainstaluj wykonawcę (`deploy/install-deploy-agent.sh` w repo produktu),
+skonfiguruj jego repo-scoped klucz GitHub oraz LAN/firewall ograniczony do HA.
+Nie używaj tokenu KSeF, klucza encji ani klucza Exportu. Poza zaufanym LAN użyj
+prywatnego tunelu/TLS. W lokalnym `/review` umieść `jdg-deploy-token` i `jdg.json`:
+
+```json
+{
+  "backend_url": "http://<lokalny-wykonawca>:3001",
+  "token_file": "/review/jdg-deploy-token"
+}
+```
+
+Plik klucza jest zwykłym plikiem w tym samym katalogu; połączenie nie dopuszcza
+przekierowania z bearerem. Adres i klucz pozostają poza Git. Dla kolejnego
+obsługiwanego projektu lokalne pliki mają jego ID, np. `<id>.json`.
+W canonical konfiguracji HA wersje wybiera `deployments/jdg.json`:
+
+```json
+{
+  "schema_version": 2,
+  "project": "jdg",
+  "backend_version": "0.3.0",
+  "integration_version": "0.7.0"
+}
+```
+
+Najpierw publikujemy prywatne wydanie backendu z paczką integracji, następnie
+scalamy zestaw konfiguracji. Dashboardy i moduły pochodzą z tego samego
+zatwierdzonego SHA konfiguracji. Konflikty lub ostrzeżenia zatrzymują skrót;
+rozwiąż je w zwykłym review. Integracja musi być już skonfigurowana i działająca.
+
+`backup/generate` kopiuje HA z bazą do skonfigurowanych miejsc, zachowując hasło;
+Import potwierdza ukończenie. Kopia pomija Apps, aby nie zatrzymać własnego
+wykonawcy. JDG ma jednorazowe przejęcie zarządzania: `hacs/repositories/list`
+i `remove` dla dokładnego dawnego repo/domeny, ze sprawdzeniem zachowania plików.
+Nie używamy uninstall ani nie usuwamy całego HACS. Dopiero po sprawdzonej
+migracji repo integracji można zmienić na prywatne i zarchiwizować.
+
+Stan każdego projektu jest oddzielny w `/data/projects/<id>`, a trwały
+`owner.json` rezerwuje HA dla jednego zatwierdzonego zadania. Pozostałe projekty
+i zwykły Apply czekają, aż właściciel zakończy lub odzyska aktualizację.
+Niepowodzenie zachowuje właściciela i plan; **Wznów import** kontynuuje ten sam
+zestaw bez ponownego wdrożenia backendu/restartu po zakończonym etapie.
+Restart App wznawia wyłącznie zatwierdzone zadanie. Plan zawiera hash profilu:
+zmiana domeny/listy plików/selekcji uniemożliwia przypadkowe wznowienie według
+nowych uprawnień. Dokończ zadania przed aktualizacją profili samego Importu.
+
+Zwykły Apply i projektowy adapter dashboardów używają wspólnego `apply_plan`
+bez syntetycznego requestu Flask. Zachowane są konflikty, provenance, read-back,
+cache bust i rollback. Export jest żądany dopiero po końcowej kontroli backendu,
+załadowanej integracji i wszystkich dashboardów. Niepełny staging, nieznany
+protokół lub uszkodzony właściciel wymagają lokalnej kontroli, a nie nowego planu.
+Rollback całego zestawu pozostaje świadomą operacją z backupów, bez automatycznego
+przywracania baz. Schema 1 i eksperymentalny `/data/jdg` z niewydanego PR 0.11.0
+nie są migrowane automatycznie: przerwane próby trzeba najpierw dokończyć/odzyskać
+na poprzednim kodzie. Produkcyjne Import/Apply, restart i bootstrap wymagają
+osobnego zlecenia; ta zmiana przygotowuje PR, nie wykonuje wdrożenia.

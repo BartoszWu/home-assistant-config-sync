@@ -6,6 +6,12 @@ from pathlib import Path, PurePosixPath
 
 from flask import Flask, abort, render_template_string, request
 from websocket import create_connection
+from project_ui import register as register_projects
+from project_deployment import Coordinator, DeploymentBusy, release_set
+from project_profiles import PROJECTS
+from dashboard_sync import DashboardSync
+from managed_files import read_snapshot, resolve_live_path
+from werkzeug.datastructures import MultiDict
 
 from dashboard_logic import (
     APPLYABLE_STATUSES,
@@ -72,6 +78,7 @@ WORKDIR = Path("/tmp/home-assistant-config")
 STATE_FILE = Path("state/dashboard-bases.json")
 IMPORT_APPLIED_EVENT = "ha_config_sync_import_applied"
 REPO_LOCK = threading.RLock()
+COORDINATOR = Coordinator(Path("/data/projects"))
 MAX_DASHBOARD_SELECTED = 20
 MAX_MANAGED_SELECTED = 50
 MAX_RESOURCE_SELECTED = 20
@@ -180,6 +187,7 @@ summary { cursor:pointer; font-weight:650; }
 </style>
 </head>
 <body><main>
+<p><a href="projects/">Aktualizacje projektów →</a></p>
 <header>
   <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
   <form id="refresh-github-form" method="get">
@@ -606,7 +614,8 @@ def ha_ws_call(message_type, **payload):
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
         raise RuntimeError("SUPERVISOR_TOKEN is unavailable.")
-    websocket = create_connection("ws://supervisor/core/websocket", timeout=15)
+    timeout = payload.pop("_timeout", 15)
+    websocket = create_connection("ws://supervisor/core/websocket", timeout=timeout)
     try:
         hello = json.loads(websocket.recv())
         if hello.get("type") != "auth_required":
@@ -761,7 +770,7 @@ def live_provenance_store():
     )
 
 
-def collect_changes(commit_sha="", revision=None):
+def collect_changes(commit_sha="", revision=None, only_relative=None):
     if revision is not None:
         commit_sha = revision.commit_sha
         reviewing_canonical = is_canonical_source(
@@ -779,6 +788,8 @@ def collect_changes(commit_sha="", revision=None):
         return changes
     for github_path in sorted(root.glob("*.json")):
         relative = github_path.name
+        if only_relative is not None and relative != only_relative:
+            continue
         if not valid_relative(relative):
             continue
         if is_ephemeral_dashboard(relative):
@@ -1004,36 +1015,52 @@ def index():
 
 @app.route("/apply", methods=["POST"])
 def apply_selected():
-    selected = request.form.getlist("selected")
-    managed_selected = request.form.getlist("managed_selected")
-    resource_selected = request.form.getlist("resource_selected")
+    try:
+        results = apply_plan(request.form)
+    except DeploymentBusy:
+        return render_review([{"ok": False, "message": "HA jest zarezerwowany przez aktualizację projektu. Dokończ lub wznów ją przed Apply."}]), 409
+    except ValueError:
+        abort(400)
+    return render_review(results)
+
+
+def apply_plan(form, *, request_export_after=True, owner=None):
+    """Shared non-HTTP Apply interface; routes and project workers use the same guards."""
+    with COORDINATOR.operation(*(owner or (None, None))):
+        return _apply_plan(form, request_export_after=request_export_after)
+
+
+def _apply_plan(form, *, request_export_after=True):
+    selected = form.getlist("selected")
+    managed_selected = form.getlist("managed_selected")
+    resource_selected = form.getlist("resource_selected")
     if not selected and not managed_selected and not resource_selected:
-        return render_review([{"ok": False, "message": "No READY item selected."}])
+        return [{"ok": False, "message": "No READY item selected."}]
     if (
         len(selected) > MAX_DASHBOARD_SELECTED
         or len(set(selected)) != len(selected)
         or any(not valid_relative(value) for value in selected)
         or any(is_ephemeral_dashboard(value) for value in selected)
     ):
-        abort(400)
+        raise ValueError("Invalid Apply plan")
     if (
         len(managed_selected) > MAX_MANAGED_SELECTED
         or len(set(managed_selected)) != len(managed_selected)
     ):
-        abort(400)
+        raise ValueError("Invalid Apply plan")
     if (
         len(resource_selected) > MAX_RESOURCE_SELECTED
         or len(set(resource_selected)) != len(resource_selected)
     ):
-        abort(400)
+        raise ValueError("Invalid Apply plan")
     try:
         for value in managed_selected:
             validate_policy_path(value)
     except ValueError:
-        abort(400)
-    reviewed_sha = (request.form.get("reviewed_sha") or "").strip()
+        raise ValueError("Invalid Apply plan")
+    reviewed_sha = (form.get("reviewed_sha") or "").strip()
     if not reviewed_sha:
-        abort(400)
+        raise ValueError("Invalid Apply plan")
 
     previews = {}
     desired_previews = {}
@@ -1042,36 +1069,36 @@ def apply_selected():
     resource_previews = {}
     resource_desired = {}
     try:
-        requested_ref, _kind = requested_source_from_request()
+        requested_ref, _kind = parse_requested_source(form.get("source"), form.get("source_sha"))
         if selected:
-            previews = parse_preview_hashes(request.form.getlist("preview_hash"))
-            desired_previews = parse_preview_hashes(request.form.getlist("desired_hash"))
+            previews = parse_preview_hashes(form.getlist("preview_hash"))
+            desired_previews = parse_preview_hashes(form.getlist("desired_hash"))
             if any(relative not in previews or relative not in desired_previews for relative in selected):
-                abort(400)
+                raise ValueError("Invalid Apply plan")
         if managed_selected:
-            managed_previews = parse_preview_hashes(request.form.getlist("managed_preview_hash"))
-            managed_desired = parse_preview_hashes(request.form.getlist("managed_desired_hash"))
+            managed_previews = parse_preview_hashes(form.getlist("managed_preview_hash"))
+            managed_desired = parse_preview_hashes(form.getlist("managed_desired_hash"))
             if any(
                 relative not in managed_previews or relative not in managed_desired
                 for relative in managed_selected
             ):
-                abort(400)
+                raise ValueError("Invalid Apply plan")
         if resource_selected:
             resource_previews = parse_preview_hashes(
-                request.form.getlist("resource_preview_hash")
+                form.getlist("resource_preview_hash")
             )
             resource_desired = parse_preview_hashes(
-                request.form.getlist("resource_desired_hash")
+                form.getlist("resource_desired_hash")
             )
             if any(
                 url not in resource_previews or url not in resource_desired
                 for url in resource_selected
             ):
-                abort(400)
+                raise ValueError("Invalid Apply plan")
     except InvalidSourceRef:
-        abort(400)
+        raise ValueError("Invalid Apply plan")
     except ValueError:
-        abort(400)
+        raise ValueError("Invalid Apply plan")
 
     results = []
     applied = []
@@ -1095,11 +1122,11 @@ def apply_selected():
                     reviewed_sha=reviewed_sha,
                 )
                 results.append({"ok": False, "message": stale_source_message(revision)})
-                return render_review(results, source=revision)
+                return results
             entries = managed_entries_for_revision()
             allowed_managed = {entry.path for entry in entries}
             if any(value not in allowed_managed for value in managed_selected):
-                abort(400)
+                raise ValueError("Invalid Apply plan")
             allowed_resources = {
                 spec.url
                 for spec in (
@@ -1108,7 +1135,7 @@ def apply_selected():
                 )
             }
             if any(value not in allowed_resources for value in resource_selected):
-                abort(400)
+                raise ValueError("Invalid Apply plan")
             store = live_provenance_store()
             created_resource_ids = []
             resource_failed = False
@@ -1313,7 +1340,7 @@ def apply_selected():
                     })
         except Exception as exception:
             results.append({"ok": False, "message": f"Apply failed: {exception}"})
-    if applied:
+    if applied and request_export_after:
         try:
             request_export(applied)
             results.append({
@@ -1336,7 +1363,7 @@ def apply_selected():
                 "(managed files are Git → HA only)."
             ),
         })
-    return render_review(results)
+    return results
 
 
 @app.route("/managed-base", methods=["POST"])
@@ -1399,6 +1426,83 @@ def export_missing_bases():
                 "message": f"Export request failed: {exception}",
             })
     return render_review(results)
+
+
+class DashboardAccess:
+    """Concrete adapter to the existing Git, provenance and HA implementation."""
+
+    def review(self, project, sha=None):
+        project = PROJECTS[project] if isinstance(project, str) else project
+        with REPO_LOCK:
+            revision = coerce_revision(refresh_repo("main", pin_sha=sha), "main")
+            if revision.stale or (sha and revision.commit_sha != sha):
+                raise ValueError("Reviewed configuration revision changed")
+            releases = release_set(
+                load_json(WORKDIR / "deployments" / (project.id + ".json")), project
+            )
+            entries = managed_entries_for_revision()
+            managed, _ = collect_managed_changes(
+                WORKDIR,
+                HA_CONFIG_ROOT,
+                [e for e in entries if e.path in project.bundles],
+                unsafe_reason,
+                stage_frontend=False,
+                commit_sha=revision.commit_sha,
+            )
+            dashboards = [
+                c
+                for name in project.dashboards
+                for c in collect_changes(revision=revision, only_relative=name)
+                if c["relative"] == name
+            ]
+            resources = [
+                c
+                for c in collect_resource_changes(MANAGED_POLICY, ha_ws_call, entries)
+                if c["relative"] in project.resources
+            ]
+            items = []
+            for kind, values, names in (
+                ("dashboard", dashboards, project.dashboards),
+                ("managed", managed, project.bundles),
+                ("resource", resources, project.resources),
+            ):
+                if len(values) != len(names) or {i["relative"] for i in values} != set(
+                    names
+                ):
+                    raise ValueError("Incomplete project dashboard set")
+                items.extend({**i, "kind": kind} for i in values)
+            return revision, releases, items
+
+    def read(self, kind, relative):
+        if kind == "dashboard":
+            return digest(ha_dashboard_config(relative))
+        if kind == "managed":
+            return read_snapshot(resolve_live_path(HA_CONFIG_ROOT, relative)).sha256
+        matches = [
+            i
+            for i in collect_resource_changes(
+                MANAGED_POLICY, ha_ws_call, managed_entries_for_revision()
+            )
+            if i["relative"] == relative
+        ]
+        if len(matches) != 1:
+            raise ValueError("Resource not found")
+        return matches[0]["preview_ha_hash"]
+
+    def provenance(self, kind, relative):
+        store = live_provenance_store()
+        return (store.dashboards if kind == "dashboard" else store.managed_files).get(
+            relative
+        )
+
+    def apply(self, form, owner):
+        data = MultiDict((k, v) for k, values in form.items() for v in values)
+        return apply_plan(data, request_export_after=False, owner=owner)
+
+    def export(self, dashboards):
+        request_export(dashboards)
+
+register_projects(app, DashboardSync(DashboardAccess()), ha_ws_call, HA_CONFIG_ROOT, COORDINATOR)
 
 
 if __name__ == "__main__":
