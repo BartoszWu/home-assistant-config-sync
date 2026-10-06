@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / 'import'), str(ROOT / 'export')]
@@ -147,13 +147,40 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         self.assertIn('data-bulk-selectable', safe_input.group())
         self.assertNotIn('data-bulk-selectable', warned_input.group())
         self.assertIn('id="select-all-ready"', html)
-        self.assertIn('Items with security warnings need individual selection.', html)
-        self.assertIn('Changed files', html)
+        self.assertIn('Ten element trzeba zaznaczyć osobno.', html)
+        self.assertIn('Konfiguracja', html)
+        self.assertIn('Aplikacje', html)
+        self.assertNotIn('Changed files', html)
         self.assertNotIn('HA current', html)
         self.assertNotIn('Review changes', html)
         self.assertNotIn('class="diff"', html)
         self.assertNotIn('Generate visual preview', html)
         self.assertNotIn('visual-preview.mjs', html)
+
+    def test_root_application_targets_use_the_same_reviewed_config_tree(self):
+        app = self.app_module
+        target = self.repo / 'deployments/jdg.json'
+        target.parent.mkdir()
+        target.write_text(json.dumps({
+            'schema_version': 2, 'project': 'jdg',
+            'backend_version': '0.4.0', 'integration_version': '0.8.0',
+        }))
+        provider = Mock(return_value=[])
+        with patch.dict(app.app.extensions, {'project_overview': provider}):
+            app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
+        targets = provider.call_args.args[0]
+        self.assertEqual(targets['jdg']['backend_version'], '0.4.0')
+        self.assertTrue(provider.call_args.kwargs['canonical'])
+
+    def test_partial_review_error_leaves_all_apply_inputs_disabled(self):
+        app = self.app_module
+        with patch.object(app, 'managed_entries_for_revision', side_effect=ValueError('synthetic read failed')):
+            html = app.app.test_client().get(
+                '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            ).get_data(as_text=True)
+        self.assertIn('Nie wszystko udało się sprawdzić', html)
+        self.assertIsNone(re.search(r'<input[^>]+name="selected"', html))
+        self.assertIn('id="apply-button" type="submit" disabled', html)
 
     def test_changed_git_after_preview_blocks_apply(self):
         app = self.app_module

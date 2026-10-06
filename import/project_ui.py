@@ -5,14 +5,13 @@ import time
 from pathlib import Path
 
 from flask import redirect, render_template_string, request
-from project_deployment import Backend, Deployments, Installer
+from project_deployment import Backend, Deployments, Installer, VERSION, SHA, release_set
+from review_ui import STYLE
 from project_profiles import PROJECTS
 
 TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 {% if job and job.status == 'running' %}<meta http-equiv="refresh" content="5">{% endif %}
-<title>Import {{ project.title }}</title><style>
-*{box-sizing:border-box}body{margin:0;background:#f4f5f7;color:#202630;font:16px system-ui,sans-serif}main{max-width:850px;margin:48px auto;padding:0 24px}a{color:#43566b}h1{font-size:36px;letter-spacing:-1px;margin:24px 0 8px}p{line-height:1.6;color:#526071}.panel{background:white;border:1px solid #dce1e8;border-radius:16px;padding:24px;margin:24px 0}.row{display:flex;justify-content:space-between;gap:16px;padding:18px 0;border-bottom:1px solid #edf0f3}.row:last-child{border:0}strong{font-weight:650}.value{text-align:right}small{color:#657384}button{border:0;border-radius:9px;padding:14px 20px;background:#244e63;color:white;font:600 16px system-ui;cursor:pointer}.secondary{background:#e7ecf0;color:#354758}.actions{display:flex;gap:12px;flex-wrap:wrap}.notice{padding:16px 20px;border-radius:10px;background:#e7eff3;line-height:1.5}.error{background:#fff0df;color:#674622}.pill{font-size:13px;padding:6px 10px;border-radius:20px;background:#e7eff3}code{font-size:13px;overflow-wrap:anywhere}@media(max-width:550px){main{margin:24px auto;padding:0 16px}h1{font-size:30px}.panel{padding:18px}.actions form,.actions button{width:100%}.row{gap:10px;font-size:15px}}
-</style><main><a href="../../">← Import konfiguracji</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
+<title>Import {{ project.title }}</title><style>{{ ui_style|safe }}</style><main class="project-page"><a href="../../">Wróć do Importu</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
 {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
 {% if not configured %}<div class="panel"><strong>Potrzebna jednorazowa konfiguracja</strong><p>Połącz Import z lokalnym wykonawcą aktualizacji projektu. Instrukcja instalacji opisuje dedykowany klucz i konfigurację połączenia.</p></div>
 {% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import odczyta zatwierdzony zestaw z konfiguracji i przygotuje podgląd. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review"><button>Sprawdź aktualizację</button></form></div>
@@ -212,7 +211,90 @@ def register(
             error=error,
             labels=LABELS,
             stages=STAGES,
+            ui_style=STYLE,
         )
+
+    def overview(targets, *, canonical=True):
+        """Fresh read-only availability, independent of stored deployment reviews."""
+        result = []
+        for project in projects.values():
+            target = targets.get(project.id) if canonical else None
+            config = config_directory / (project.id + ".json")
+            configured = config.is_file()
+            backend_version = integration_version = None
+            job = None
+            read_error = False
+            if canonical:
+                # Do not use get_manager: opening this list must never launch work.
+                try:
+                    job = Deployments(
+                        directory, Installer(ha_root, project), None, None, None,
+                        project, coordinator,
+                    ).read()
+                    if job and (
+                        job.get("status") not in {"review", "running", "failed", "success", "cancelled"}
+                        or not isinstance(job.get("source_sha"), str)
+                        or not SHA.fullmatch(job["source_sha"])
+                    ):
+                        raise ValueError("Invalid saved project plan")
+                    if job and job["status"] in {"review", "running", "failed"}:
+                        target = release_set(job["releases"], project)
+                except Exception:
+                    job = None
+                    read_error = True
+                if configured:
+                    try:
+                        active = backend_factory(config).request("/status", timeout=4)
+                        version = active.get("version")
+                        if active.get("healthy") is True and isinstance(version, str) and VERSION.fullmatch(version):
+                            backend_version = version
+                    except Exception:
+                        pass
+                try:
+                    loaded = ha_call(project.domain + "/version", _timeout=4)
+                except Exception:
+                    loaded = None
+                if isinstance(loaded, dict) and loaded.get("loaded") is True:
+                    version = loaded.get("version")
+                    if isinstance(version, str) and VERSION.fullmatch(version):
+                        integration_version = version
+            target_label = "w planie" if job and job["status"] in {"review", "running", "failed"} else "w konfiguracji"
+            components = [
+                {"label": "Usługa", "current": backend_version, "target_label": target_label,
+                 "target": target.get("backend_version") if target else None},
+                {"label": "Integracja HA", "current": integration_version, "target_label": target_label,
+                 "target": target.get("integration_version") if target else None},
+            ]
+            state, label, action = "same", "Bez zmian", "Otwórz"
+            description = "Wersje zgodne z konfiguracją"
+            if not canonical:
+                state, label = "source", "Sprawdź na main"
+                description = "Aktualizacje aplikacji korzystają z main"
+            elif read_error:
+                state, label = "unknown", "Nie udało się sprawdzić"
+                description = "Nie można odczytać zapisanego planu"
+            elif job and job["status"] in {"running", "failed", "review"}:
+                state = job["status"]
+                label = LABELS[state]
+                action = "Wznów import" if state == "failed" else "Otwórz plan"
+                description = "Zapisany plan / " + job["source_sha"][:7]
+            elif not configured:
+                state, label = "unconfigured", "Połącz wykonawcę"
+                description = "Potrzebna jednorazowa konfiguracja"
+            elif not target or any(not c["current"] for c in components):
+                state, label = "unknown", "Nie udało się sprawdzić"
+                description = "Sprawdź połączenie i zestaw wersji"
+            elif any(c["current"] != c["target"] for c in components):
+                state, label, action = "update", "Dostępna zmiana", "Sprawdź aktualizację"
+                description = "Wersje do zmiany"
+            result.append({
+                "id": project.id, "title": project.title, "state": state,
+                "status_label": label, "action_label": action,
+                "description": description, "components": components,
+            })
+        return result
+
+    app.extensions["project_overview"] = overview
 
     @app.get("/jdg/")
     def legacy_jdg_link():
@@ -221,9 +303,9 @@ def register(
     @app.get("/projects/")
     def project_list():
         return render_template_string(
-            '<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aktualizacje projektów</title><style>{{ style|safe }}</style><main><a href="../">← Import konfiguracji</a><h1>Aktualizacje projektów</h1><p>Backend na serwerze, integracja HA i dashboardy w jednym imporcie.</p><div class="panel">{% for p in projects.values() %}<div class="row"><strong>{{ p.title }}</strong><a href="{{ p.id }}/">Sprawdź aktualizację →</a></div>{% endfor %}</div></main></html>',
+            '<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Aktualizacje projektów</title><style>{{ style|safe }}</style><main><a href="../">Wróć do Importu</a><h1>Aktualizacje projektów</h1><p>Backend na serwerze, integracja HA i dashboardy w jednym imporcie.</p><div class="panel">{% for p in projects.values() %}<div class="row"><strong>{{ p.title }}</strong><a href="{{ p.id }}/">Sprawdź aktualizację →</a></div>{% endfor %}</div></main></html>',
             projects=projects,
-            style=TEMPLATE.split("<style>")[1].split("</style>")[0],
+            style=STYLE,
         )
 
     @app.get("/projects/<project_id>/")

@@ -1,0 +1,233 @@
+{% macro source_inputs(source) %}
+{% if source and source.source_kind == 'commit' %}
+<input type="hidden" name="source_sha" value="{{ source.source_ref }}">{% elif source %}
+<input type="hidden" name="source" value="{{ source.source_ref }}">{% endif %}
+{% endmacro %}
+{% macro review_item(change) %}
+<div class="review-item" id="{{ change.anchor }}">
+<div class="item-line">
+<div class="item-name">{% if change.selectable and has_ready %}
+<input type="checkbox" id="select-{{ change.anchor }}" name="{{ change.prefix }}selected" value="{{ change.relative }}" aria-label="{{ change.label }}: {{ change.path }}" {% if not change.warnings %}data-bulk-selectable{% endif %}>
+<input type="hidden" name="{{ change.prefix }}preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
+<input type="hidden" name="{{ change.prefix }}desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
+<label for="select-{{ change.anchor }}">{{ change.label }}{% if change.affected_views %}<span class="item-scope">Zakładki: {{ change.affected_views|join(", ") }}</span>{% endif %}</label>{% else %}
+<span class="item-placeholder" aria-hidden="true">
+</span>
+<span>{{ change.label }}{% if change.affected_views %}<span class="item-scope">Zakładki: {{ change.affected_views|join(", ") }}</span>{% endif %}</span>{% endif %}
+</div>
+<span class="status {{ change.css }}">{{ change.status_label }}</span>
+</div>
+{% if change.warnings %}
+<div class="warning">
+<strong>Sprawdź ostrzeżenie przed wyborem</strong>Przejrzyj wskazaną treść w GitHub. Ten element trzeba zaznaczyć osobno.{% for warning in change.warnings %}
+<p>{{ warning.reason }}
+{% if warning.field %} ({{ warning.field }}){% endif %}
+{% if warning.path and warning.path != '$' %}: {{ warning.path }}
+{% endif %}
+</p>{% endfor %}
+</div>{% endif %}
+{% if not change.selectable and change.reason and change.status_label != 'Bez zmian' %}
+<p class="warning">{{ change.reason }}</p>{% endif %}
+<details class="item-details">
+<summary>Szczegóły</summary>
+<dl class="technical-grid">
+<dt>Dotyczy</dt>
+<dd>{{ change.path }}</dd>
+<dt>Status</dt>
+<dd>{{ change.status }}</dd>
+<dt>Wersja Git</dt>
+<dd>{{ git_source.short_sha if git_source else '-' }}
+{% if change.preview_desired_hash %} / {{ change.preview_desired_hash[:12] }}
+{% endif %}
+</dd>
+<dt>Wersja HA</dt>
+<dd>{{ change.preview_ha_hash[:12] if change.preview_ha_hash else 'Brak' }}</dd>{% if change.provenance_label %}
+<dt>Źródło HA</dt>
+<dd>{{ change.provenance_label }}
+{% if change.live_source_ref %} / {{ change.live_source_ref }} / {{ change.live_short_sha }}
+{% endif %}
+</dd>{% endif %}
+</dl>{% if change.reason %}
+<p>{{ change.reason }}</p>{% endif %}
+{% if change.staging and change.staging.error %}
+<p>Nie udało się przygotować pliku do podglądu: {{ change.staging.error }}</p>{% endif %}
+</details>
+</div>{% endmacro %}
+
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Import | HA Config Sync</title>
+<style>{{ ui_style|safe }}</style>
+</head>
+<body>
+<main>
+<header class="page-header">
+<div class="brand">
+<span class="brand-icon" aria-hidden="true">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+<path d="m3 11 9-8 9 8M6 9v11h12V9M12 9v7m-3-3 3 3 3-3"/>
+</svg>
+</span>
+<div>
+<div class="brand-name">HA Config Sync</div>
+<h1>Import</h1>
+</div>
+</div>
+<form id="refresh-github-form" method="get">{{ source_inputs(git_source) }}<button id="refresh-button" type="submit">Sprawdź ponownie</button>
+</form>
+</header>
+<section class="overview {{ overview.tone }}" aria-labelledby="overview-title">
+<h2 id="overview-title">
+<span class="signal" aria-hidden="true">{% if overview.tone == 'current' %}✓{% elif overview.tone == 'attention' %}!{% else %}↓{% endif %}
+</span> {{ overview.title }}</h2>
+<p>{% if error or managed_policy_error or resource_error %}Część danych jest niedostępna. Poniżej znajdziesz informację, co wymaga sprawdzenia.{% elif overview.ready or overview.updates %}Zobacz, czego dotyczą zmiany. Wybierz konfigurację do wgrania lub otwórz aktualizację aplikacji.{% elif overview.missing_base %}Zapisz bazę synchronizacji przed następną zmianą.{% elif overview.attention %}Porównaj zmiany w Home Assistant i konfiguracji przed wgraniem.{% else %}Stan konfiguracji i wersje aplikacji znajdziesz poniżej.{% endif %}
+</p>
+<nav class="section-links" aria-label="Sekcje importu">
+<a href="#applications">Aplikacje <span>{{ project_overview|length }}</span>
+</a>
+<a href="#configuration">Konfiguracja <span>{{ changed_groups|length }}</span>
+</a>
+</nav>
+</section>
+{% for result in results or [] %}
+<div class="result {% if not result.ok %}bad{% endif %}" role="status">{{ result.message }}</div>{% endfor %}
+{% if git_source and git_source.stale %}
+<p class="stale">
+<strong>SOURCE UPDATED — REFRESH REVIEW</strong>
+<br>Źródło zmieniło się od sprawdzenia. Sprawdź ponownie przed wgraniem. Przegląd: {{ git_source.reviewed_sha[:7] if git_source.reviewed_sha else '?' }}, obecnie: {{ git_source.short_sha }}.</p>{% endif %}
+
+<section id="applications" aria-labelledby="applications-title">
+<div class="section-heading">
+<h2 id="applications-title">Aplikacje</h2>
+<span class="small">Usługa i integracja HA</span>
+</div>
+<div class="list-surface">
+{% for project in project_overview %}
+<div class="app-row">
+<div class="app-name">
+<span class="app-mark" aria-hidden="true">{{ project.title[:3] }}</span>
+<div>
+<h3>{{ project.title }}</h3>
+<span class="small">{{ project.description }}</span>
+</div>
+</div>
+<div class="version-list">{% for component in project.components %}
+<div class="version-line">
+<span>{{ component.label }}</span>
+<span class="version-change">{% if component.current %}
+<span class="{% if component.target and component.current != component.target %}version-before{% endif %}">{{ component.current }}</span>{% else %}
+<span class="version-unknown">Nieznana</span>{% endif %}
+{% if component.target and component.current != component.target %}
+<span class="version-arrow" aria-hidden="true">→</span>
+<span class="version-target">
+<span class="small">{{ component.target_label or "w konfiguracji" }} </span>{{ component.target }}</span>{% endif %}
+</span>
+</div>{% endfor %}
+</div>
+<div class="app-action">
+<span class="status {{ project.state }}">{{ project.status_label }}</span>
+<a href="projects/{{ project.id }}/">{{ project.action_label }}</a>
+</div>
+</div>{% else %}
+<div class="empty-state">Brak aplikacji obsługiwanych przez Import.</div>{% endfor %}
+</div>
+</section>
+
+<section id="configuration" aria-labelledby="configuration-title">
+<div class="section-heading">
+<h2 id="configuration-title">Konfiguracja</h2>
+<span class="small">{{ git_source.source_ref if git_source else 'main' }} / wersja {{ git_source.short_sha if git_source else 'nieznana' }}</span>
+</div>
+{% if error %}
+<div class="notice error" role="alert">Nie można sprawdzić konfiguracji: {{ error }}</div>{% endif %}
+{% if managed_policy_error %}
+<div class="notice error" role="alert">Nie można sprawdzić plików konfiguracji: {{ managed_policy_error }}</div>{% endif %}
+{% if resource_error %}
+<div class="notice error" role="alert">Nie można sprawdzić rejestracji kart: {{ resource_error }}</div>{% endif %}
+<form id="apply-form" method="post" action="apply">
+{% if git_source %}
+<input type="hidden" name="source" value="{{ git_source.source_ref if git_source.source_kind == 'branch' else 'main' }}">{% if git_source.source_kind == 'commit' %}
+<input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">{% endif %}
+<input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">{% endif %}
+{% if has_ready %}
+<div class="bulk-select" id="bulk-select" hidden>
+<label for="select-all-ready">
+<input id="select-all-ready" type="checkbox">Zaznacz gotowe zmiany</label>
+<span id="selection-count" class="small" role="status" aria-live="polite">
+</span>
+</div>{% endif %}
+<div class="list-surface">{% for group in changed_groups %}
+<section class="topic">
+<div class="topic-heading">
+<h3>{{ group.title }}</h3>
+<span class="small">{{ group.changed|length }} {% if group.changed|length == 1 %}element{% else %}elementy{% endif %}
+</span>
+</div>{% for change in group.changed %}{{ review_item(change) }}
+{% endfor %}
+</section>{% else %}
+<div class="empty-state">{% if error or managed_policy_error or resource_error %}Nie udało się potwierdzić pełnego stanu konfiguracji.{% elif configuration_groups %}
+<span class="empty-icon" aria-hidden="true">✓</span> Konfiguracja jest zgodna z Home Assistant.{% else %}Brak konfiguracji obsługiwanej przez Import w wybranej wersji.{% endif %}
+</div>{% endfor %}
+</div>
+{% if unchanged_count %}
+<details class="unchanged-files">
+<summary>Bez zmian ({{ unchanged_count }})</summary>
+<div class="list-surface">{% for group in configuration_groups if group.unchanged %}
+<section class="topic">
+<div class="topic-heading">
+<h3>{{ group.title }}</h3>
+</div>{% for change in group.unchanged %}{{ review_item(change) }}
+{% endfor %}
+</section>{% endfor %}
+</div>
+</details>{% endif %}
+<div class="actions">
+<span class="small action-caption">Wgranie dotyczy wyłącznie zaznaczonych elementów konfiguracji.</span>
+<button id="cancel-button" class="secondary" type="reset">Wyczyść wybór</button>
+<div id="apply-progress" class="apply-progress" role="status" aria-live="polite">
+<span class="spinner" aria-hidden="true">
+</span>
+<span>Wgrywanie i sprawdzanie…</span>
+</div>
+<button id="apply-button" type="submit" {% if not has_ready %}disabled{% endif %}>Wgraj zaznaczone</button>
+</div>
+</form>
+</section>
+
+{% if has_missing_base or has_managed_missing_base %}
+<details class="base-tools" open>
+<summary>Konfiguracja zgodna, potrzebna baza synchronizacji</summary>
+<p class="small">Zapisz bazę przed następną zmianą.</p>{% if has_missing_base %}
+<form method="post" action="export">{{ source_inputs(git_source) }}<button class="secondary" type="submit">Uruchom Export dla dashboardów</button>
+</form>{% endif %}
+{% if has_managed_missing_base %}
+<form method="post" action="managed-base">{{ source_inputs(git_source) }}<button class="secondary" type="submit">Zapisz bazę plików konfiguracji</button>
+</form>{% endif %}
+</details>{% endif %}
+<details class="source-panel" id="source">
+<summary>Źródło: {{ git_source.source_ref if git_source else 'main' }} / {{ git_source.short_sha if git_source else 'nieznane' }}</summary>
+<p class="source-resolved">Sprawdzona wersja: <code>{{ git_source.commit_sha if git_source else '-' }}</code>. Wybór innego źródła dotyczy tego przeglądu. Aplikacje są aktualizowane z main.</p>
+<form id="source-form" method="get" class="source-form">
+<label>Gałąź<select name="source" aria-label="Gałąź źródłowa">{% for name in (git_source.available_branches if git_source else ['main']) %}
+<option value="{{ name }}" {% if git_source and git_source.source_kind == 'branch' and git_source.source_ref == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
+</select>
+</label>
+<label>Commit (opcjonalnie)<input type="text" name="source_sha" value="{{ git_source.source_ref if git_source and git_source.source_kind == 'commit' else '' }}" pattern="[0-9a-f]{40}" placeholder="Pełny SHA commita" spellcheck="false" autocomplete="off">
+</label>
+<button id="refresh-source-button" class="secondary" type="submit">Sprawdź źródło</button>
+</form>
+</details>
+</main>
+<div id="refresh-progress" class="refresh-progress" role="status" aria-live="polite">
+<div class="refresh-progress-card">
+<span class="spinner" aria-hidden="true">
+</span>
+<span data-busy-label>Sprawdzanie zmian…</span>
+</div>
+</div>
+<script>{{ ui_script|safe }}</script>
+</body>
+</html>

@@ -20,6 +20,10 @@ RUN apk add --no-cache \
         "PyYAML==6.0.2"
 
 COPY app.py /app.py
+COPY review_ui.py /review_ui.py
+COPY review.css /review.css
+COPY review.html /review.html
+COPY review.js /review.js
 COPY project_ui.py /project_ui.py
 COPY project_deployment.py /project_deployment.py
 COPY project_profiles.py /project_profiles.py

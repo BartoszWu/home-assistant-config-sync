@@ -123,16 +123,40 @@ while the base is still absent. Import reports
 
 ## Import review UI
 
-Import shows changed files with their status, line counts and LIVE provenance.
-Unchanged files are collapsed. The **Select all ready items** checkbox selects
-eligible dashboards, managed files and Lovelace resources together. Items with
-security warnings still require individual selection. Review their content in
-GitHub before selecting them. **Cancel** clears the selection.
+The opening screen shows application availability and configuration changes in
+one place. **Aplikacje** compares current backend and loaded HA integration
+versions with the approved version set in the reviewed `main` commit. These
+are read-only status calls with short timeouts; opening Import does not prepare
+a deployment, download a package or approve an update. Unavailable versions
+remain unknown. Saved pending/failed jobs retain their recovery link; a previous
+successful job never substitutes for current version checks. Pending plans show
+their own pinned target versions, labelled **w planie**. Application
+updates still require their separate review and explicit approval. Feature
+branches and explicit commit reviews do not offer application updates from a
+different source.
 
-Apply remains an explicit action. Import pins the reviewed commit and checks
-both the Git desired hash and current HA state again before writing. It
-verifies the result after Apply. The item list is available without JavaScript;
-JavaScript adds bulk selection and progress feedback.
+**Konfiguracja** groups dashboards, cards, sensors/rules and templates by their
+subject, including the affected dashboard tabs when JSON identifies them. Files,
+content fingerprints, original statuses and LIVE provenance
+are available in **Szczegóły**. There is no rendered content diff, line count or
+duplicate file index. Unchanged items and source controls are collapsed. Partial
+read failures never produce an all-current summary.
+
+**Zaznacz gotowe zmiany** selects eligible dashboards, managed files and Lovelace
+resources together. Items with security warnings require individual selection
+after GitHub review. **Wyczyść wybór** clears the selection. The Apply action is
+labelled **Wgraj zaznaczone** and remains explicit; application updates are not
+part of this selection. The action bar becomes sticky only after a selection.
+
+Import pins the reviewed commit and checks both the Git desired hash and current
+HA state again before writing, then verifies the result. The item list and
+individual selection are available without JavaScript; JavaScript adds bulk
+selection and progress feedback. The shared visual style supports light/dark
+mode, keyboard focus, reduced motion and narrow screens without remote fonts.
+
+Example layouts use synthetic data: [desktop](docs/import-ui/desktop.png),
+[mobile dark mode](docs/import-ui/mobile-dark.png),
+[previous screen](docs/import-ui/before.png).
 
 ## Repository layout
 
