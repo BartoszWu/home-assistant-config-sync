@@ -592,6 +592,12 @@ code {
 .value {
   text-align: right;
 }
+.project-progress .refresh-progress-card {
+  max-width: calc(100% - 32px);
+}
+.project-progress .spinner {
+  flex-shrink: 0;
+}
 .project-page h1 {
   margin: 24px 0 12px;
 }
@@ -739,4 +745,38 @@ code {
   }
 }
 
-.item-scope { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+.item-scope {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.loading-title {
+  padding-top: 24px;
+  margin-bottom: 10px;
+}
+.loading-surface {
+  display: grid;
+  gap: 16px;
+  padding: 24px;
+}
+.skeleton {
+  height: 18px;
+  border-radius: 5px;
+  background: var(--line);
+  animation: skeleton-pulse 1.5s ease-in-out infinite alternate;
+}
+.skeleton.short {
+  width: 60%;
+}
+@keyframes skeleton-pulse {
+  to {
+    opacity: 0.45;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}

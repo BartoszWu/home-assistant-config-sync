@@ -124,7 +124,14 @@ while the base is still absent. Import reports
 ## Import review UI
 
 The opening screen shows application availability and configuration changes in
-one place. **Aplikacje** compares current backend and loaded HA integration
+one place. The initial page returns before Git/HA reads, with loading placeholders.
+After one Git checkout, application status and configuration comparisons run in
+parallel and appear independently through an Ingress-protected event stream. Each
+review stays on that one immutable SHA; unfinished or failed configuration checks
+never expose selectable Apply items. An interrupted stream blocks selection and
+offers a fresh check. The all-current summary appears only after both sections
+finish. Without JavaScript, **otwórz pełny przegląd** opens the complete synchronous
+review. **Aplikacje** compares current backend and loaded HA integration
 versions with the approved version set in the reviewed `main` commit. These
 are read-only status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
@@ -296,7 +303,10 @@ revision-aware notifications, candidate review, and runtime-only no-commit behav
 Import 0.12.0 udostępnia **Aktualizacje projektów → JDG → Sprawdź aktualizację →
 Importuj JDG**. Wspólny moduł przygotowuje niezmienny plan, wykonuje backup HA,
 aktualizuje backend i integrację, restartuje Core gdy potrzeba, stosuje zestaw
-dashboardów i sprawdza działanie. JDG jest pierwszym profilem; ten sam moduł
+dashboardów i sprawdza działanie. Przyciski na ekranie projektu pokazują od razu
+stan oczekiwania, również podczas powrotu do Importu i anulowania przygotowanej
+aktualizacji. Anulowanie potwierdza komunikat; nie uruchamia importu. Link i formularze
+działają także bez JavaScriptu. JDG jest pierwszym profilem; ten sam moduł
 jest testowany także z drugim syntetycznym projektem i inną paczką integracji.
 
 `import/project_profiles.py` określa obsługiwane projekty: domenę, dokładne pliki

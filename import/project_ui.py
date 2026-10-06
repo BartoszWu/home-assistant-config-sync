@@ -11,20 +11,25 @@ from project_profiles import PROJECTS
 
 TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 {% if job and job.status == 'running' %}<meta http-equiv="refresh" content="5">{% endif %}
-<title>Import {{ project.title }}</title><style>{{ ui_style|safe }}</style><main class="project-page"><a href="../../">Wróć do Importu</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
+<title>Import {{ project.title }}</title><style>{{ ui_style|safe }}</style><main class="project-page"><a id="project-back" href="../../">Wróć do Importu</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
 {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+{% if job and job.status == "cancelled" %}<p class="notice" role="status">Przygotowana aktualizacja została anulowana.</p>{% endif %}
 {% if not configured %}<div class="panel"><strong>Potrzebna jednorazowa konfiguracja</strong><p>Połącz Import z lokalnym wykonawcą aktualizacji projektu. Instrukcja instalacji opisuje dedykowany klucz i konfigurację połączenia.</p></div>
-{% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import odczyta zatwierdzony zestaw z konfiguracji i przygotuje podgląd. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review"><button>Sprawdź aktualizację</button></form></div>
+{% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import odczyta zatwierdzony zestaw z konfiguracji i przygotuje podgląd. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź aktualizację</button></form></div>
 {% else %}<div class="panel"><span class="pill">{{ labels.get(job.status, job.status) }}</span>
 <div class="row"><strong>Backend {{ project.title }}</strong><span class="value"><small>{{ job.backend_before.version or "Nieznana" }} → </small>{{ job.releases.backend_version }}</span></div>
 <div class="row"><strong>Integracja HA</strong><span class="value"><small>{{ job.integration_version_before or "Nieznana" }} → </small>{{ job.releases.integration_version }}</span></div>
 <div class="row"><strong>Dashboardy ({{ project.dashboards|length }})</strong><span class="value">Z konfiguracji<br><small>Wersja {{ job.source_sha[:7] }}</small></span></div>
 </div>
-{% if job.status == 'review' %}<p class="notice">Import wykona kopię HA, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.</p><div class="actions"><form method="post" action="start"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
+{% if job.status == 'review' %}<p class="notice">Import wykona kopię HA, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
 {% elif job.status == 'running' %}<p class="notice" role="status">Trwa: {{ stages.get(job.stage, job.stage) }}. Możesz zamknąć ten ekran. Postęp zostanie zapisany.</p>
-{% elif job.status == 'failed' %}<p class="notice error">Przerwano etap: {{ stages.get(job.stage, job.stage) }}. {{ job.message }}</p><form method="post" action="resume"><input type="hidden" name="id" value="{{ job.id }}"><button>Wznów import</button></form>
-{% else %}<p class="notice">{{ project.title }} został zaktualizowany. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p><form method="post" action="review"><button>Sprawdź kolejną aktualizację</button></form>{% endif %}
-{% endif %}</main></html>"""
+{% elif job.status == 'failed' %}<p class="notice error">Przerwano etap: {{ stages.get(job.stage, job.stage) }}. {{ job.message }}</p><form method="post" action="resume" data-busy-message="Wznawianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><button>Wznów import</button></form>
+{% else %}<p class="notice">{{ project.title }} został zaktualizowany. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź kolejną aktualizację</button></form>{% endif %}
+{% endif %}</main>
+<div id="project-progress" class="refresh-progress project-progress" role="status" aria-live="polite">
+<div class="refresh-progress-card"><span class="spinner" aria-hidden="true"></span><span data-busy-label></span></div>
+</div><script>{{ ui_script|safe }}</script></html>"""
+SCRIPT = Path(__file__).with_name("project.js").read_text(encoding="utf-8")
 LABELS = {
     "review": "Gotowe do importu",
     "running": "Aktualizacja w toku",
@@ -212,6 +217,7 @@ def register(
             labels=LABELS,
             stages=STAGES,
             ui_style=STYLE,
+            ui_script=SCRIPT,
         )
 
     def overview(targets, *, canonical=True):

@@ -54,31 +54,7 @@
 </details>
 </div>{% endmacro %}
 
-<!doctype html>
-<html lang="pl">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Import | HA Config Sync</title>
-<style>{{ ui_style|safe }}</style>
-</head>
-<body>
-<main>
-<header class="page-header">
-<div class="brand">
-<span class="brand-icon" aria-hidden="true">
-<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-<path d="m3 11 9-8 9 8M6 9v11h12V9M12 9v7m-3-3 3 3 3-3"/>
-</svg>
-</span>
-<div>
-<div class="brand-name">HA Config Sync</div>
-<h1>Import</h1>
-</div>
-</div>
-<form id="refresh-github-form" method="get">{{ source_inputs(git_source) }}<button id="refresh-button" type="submit">Sprawdź ponownie</button>
-</form>
-</header>
+{% macro overview_block() %}
 <section class="overview {{ overview.tone }}" aria-labelledby="overview-title">
 <h2 id="overview-title">
 <span class="signal" aria-hidden="true">{% if overview.tone == 'current' %}✓{% elif overview.tone == 'attention' %}!{% else %}↓{% endif %}
@@ -92,13 +68,8 @@
 </a>
 </nav>
 </section>
-{% for result in results or [] %}
-<div class="result {% if not result.ok %}bad{% endif %}" role="status">{{ result.message }}</div>{% endfor %}
-{% if git_source and git_source.stale %}
-<p class="stale">
-<strong>SOURCE UPDATED — REFRESH REVIEW</strong>
-<br>Źródło zmieniło się od sprawdzenia. Sprawdź ponownie przed wgraniem. Przegląd: {{ git_source.reviewed_sha[:7] if git_source.reviewed_sha else '?' }}, obecnie: {{ git_source.short_sha }}.</p>{% endif %}
-
+{% endmacro %}
+{% macro applications_block() %}
 <section id="applications" aria-labelledby="applications-title">
 <div class="section-heading">
 <h2 id="applications-title">Aplikacje</h2>
@@ -141,6 +112,8 @@
 </div>
 </section>
 
+{% endmacro %}
+{% macro configuration_block() %}
 <section id="configuration" aria-labelledby="configuration-title">
 <div class="section-heading">
 <h2 id="configuration-title">Konfiguracja</h2>
@@ -212,9 +185,12 @@
 <form method="post" action="managed-base">{{ source_inputs(git_source) }}<button class="secondary" type="submit">Zapisz bazę plików konfiguracji</button>
 </form>{% endif %}
 </details>{% endif %}
+
+{% endmacro %}
+{% macro source_block() %}
 <details class="source-panel" id="source">
 <summary>Źródło: {{ git_source.source_ref if git_source else 'main' }} / {{ git_source.short_sha if git_source else 'nieznane' }}</summary>
-<p class="source-resolved">Sprawdzona wersja: <code>{{ git_source.commit_sha if git_source else '-' }}</code>. Wybór innego źródła dotyczy tego przeglądu. Aplikacje są aktualizowane z main.</p>
+<p class="source-resolved">{% if git_source and git_source.commit_sha %}Sprawdzona wersja: <code>{{ git_source.commit_sha }}</code>.{% else %}Źródło nie zostało jeszcze sprawdzone.{% endif %} Wybór innego źródła dotyczy tego przeglądu. Aplikacje są aktualizowane z main.</p>
 <form id="source-form" method="get" class="source-form">
 <label>Gałąź<select name="source" aria-label="Gałąź źródłowa">{% for name in (git_source.available_branches if git_source else ['main']) %}
 <option value="{{ name }}" {% if git_source and git_source.source_kind == 'branch' and git_source.source_ref == name %}selected{% endif %}>{{ name }}</option>{% endfor %}
@@ -225,6 +201,59 @@
 <button id="refresh-source-button" class="secondary" type="submit">Sprawdź źródło</button>
 </form>
 </details>
+{% endmacro %}
+{% macro loading_section(id, title, message) %}
+<section id="{{ id }}" aria-labelledby="{{ id }}-title" aria-busy="true">
+<div class="section-heading"><h2 id="{{ id }}-title">{{ title }}</h2><span class="small" role="status">{{ message }}</span></div>
+<div class="list-surface loading-surface"><div class="skeleton" aria-hidden="true"></div><div class="skeleton short" aria-hidden="true"></div><div class="skeleton" aria-hidden="true"></div></div>
+</section>
+{% endmacro %}
+{% if fragment == 'overview' %}{{ overview_block() }}
+{% elif fragment == 'applications' %}{{ applications_block() }}
+{% elif fragment == 'configuration' %}{{ configuration_block() }}
+{% elif fragment == 'source' %}{{ source_block() }}
+{% else %}
+
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Import | HA Config Sync</title>
+<style>{{ ui_style|safe }}</style>
+</head>
+<body {% if loading %}data-review-stream="review-stream{{ '?' + request.query_string.decode() if request.query_string else '' }}"{% endif %}>
+<main>
+{% if loading %}<noscript><p class="notice">Aby sprawdzić zmiany bez JavaScriptu, <a href="?view=full&amp;{{ request.query_string.decode() }}">otwórz pełny przegląd</a>.</p></noscript>{% endif %}
+<header class="page-header">
+<div class="brand">
+<span class="brand-icon" aria-hidden="true">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+<path d="m3 11 9-8 9 8M6 9v11h12V9M12 9v7m-3-3 3 3 3-3"/>
+</svg>
+</span>
+<div>
+<div class="brand-name">HA Config Sync</div>
+<h1>Import</h1>
+</div>
+</div>
+<form id="refresh-github-form" method="get">{{ source_inputs(git_source) }}<button id="refresh-button" type="submit">Sprawdź ponownie</button>
+</form>
+</header>
+<div id="overview-content">{% if loading %}
+<h2 id="overview-title" class="loading-title">Sprawdzanie zmian…</h2>
+<p class="small" id="review-loading-status" role="status">Łączenie z konfiguracją…</p>
+<nav class="section-links" aria-label="Sekcje importu"><a href="#applications">Aplikacje <span id="applications-count">—</span></a><a href="#configuration">Konfiguracja <span id="configuration-count">—</span></a></nav>
+{% else %}{{ overview_block() }}{% endif %}</div>
+{% for result in results or [] %}
+<div class="result {% if not result.ok %}bad{% endif %}" role="status">{{ result.message }}</div>{% endfor %}
+{% if git_source and git_source.stale %}
+<p class="stale">
+<strong>SOURCE UPDATED — REFRESH REVIEW</strong>
+<br>Źródło zmieniło się od sprawdzenia. Sprawdź ponownie przed wgraniem. Przegląd: {{ git_source.reviewed_sha[:7] if git_source.reviewed_sha else '?' }}, obecnie: {{ git_source.short_sha }}.</p>{% endif %}
+
+<div id="applications-content">{% if loading %}{{ loading_section("applications", "Aplikacje", "Sprawdzanie wersji aplikacji…") }}{% else %}{{ applications_block() }}{% endif %}</div>
+<div id="configuration-content">{% if loading %}{{ loading_section("configuration", "Konfiguracja", "Sprawdzanie dashboardów i kart…") }}{% else %}{{ configuration_block() }}{% endif %}</div><div id="source-content">{% if not loading %}{{ source_block() }}{% endif %}</div>
 </main>
 <div id="refresh-progress" class="refresh-progress" role="status" aria-live="polite">
 <div class="refresh-progress-card">
@@ -236,3 +265,5 @@
 <script>{{ ui_script|safe }}</script>
 </body>
 </html>
+
+{% endif %}
