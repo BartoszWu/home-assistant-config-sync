@@ -202,6 +202,34 @@ class CheckoutSourceTests(unittest.TestCase):
                 source_ref="feature/not-a-real-branch",
             )
 
+    def test_project_keeps_approved_main_tree_after_export_advances_main(self):
+        new_tip = commit_file(self.src, "inventory/summary.json", "{}\n", "synthetic export")
+        run_git(["git", "push", str(self.origin), "main"], cwd=self.src)
+        revision = checkout_source(
+            repo=str(self.origin), workdir=self.workdir, runner=run_git,
+            source_ref="main", pin_sha=self.main_sha, allow_main_ancestor=True,
+        )
+        self.assertEqual(revision.commit_sha, self.main_sha)
+        self.assertEqual(revision.branch_tip_sha, new_tip)
+        self.assertEqual(revision.source_ref, "main")
+        self.assertFalse(revision.stale)
+        self.assertFalse((self.workdir / "inventory/summary.json").exists())
+
+    def test_project_rejects_pin_outside_main_history(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            checkout_source(
+                repo=str(self.origin), workdir=self.workdir, runner=run_git,
+                source_ref="main", pin_sha=self.feature_tip, allow_main_ancestor=True,
+            )
+
+    def test_canonical_ancestor_mode_cannot_authorize_feature_source(self):
+        with self.assertRaises(InvalidSourceRef):
+            checkout_source(
+                repo=str(self.origin), workdir=self.workdir, runner=run_git,
+                source_ref="feature/dashboard-redesign", pin_sha=self.feature_tip,
+                allow_main_ancestor=True,
+            )
+
     def test_review_artifacts_share_one_sha(self):
         revision = checkout_source(
             repo=str(self.origin),

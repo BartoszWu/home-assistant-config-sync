@@ -556,7 +556,7 @@ def run(command, cwd=None):
     ).stdout.strip()
 
 
-def refresh_repo(source_ref=None, pin_sha=None):
+def refresh_repo(source_ref=None, pin_sha=None, *, allow_main_ancestor=False):
     with REPO_LOCK:
         if not KEY.exists():
             raise RuntimeError("Read-only GitHub deploy key is not configured.")
@@ -568,6 +568,7 @@ def refresh_repo(source_ref=None, pin_sha=None):
             runner=run,
             source_ref=source_ref or DEFAULT_BRANCH,
             pin_sha=pin_sha,
+            allow_main_ancestor=allow_main_ancestor,
         )
 
 
@@ -1027,10 +1028,15 @@ def apply_selected():
 def apply_plan(form, *, request_export_after=True, owner=None):
     """Shared non-HTTP Apply interface; routes and project workers use the same guards."""
     with COORDINATOR.operation(*(owner or (None, None))):
-        return _apply_plan(form, request_export_after=request_export_after)
+        if owner is not None and COORDINATOR.owner() != {"project": owner[0], "id": owner[1]}:
+            raise DeploymentBusy("Canonical project pin requires its approved owner")
+        return _apply_plan(
+            form, request_export_after=request_export_after,
+            allow_main_ancestor=owner is not None,
+        )
 
 
-def _apply_plan(form, *, request_export_after=True):
+def _apply_plan(form, *, request_export_after=True, allow_main_ancestor=False):
     selected = form.getlist("selected")
     managed_selected = form.getlist("managed_selected")
     resource_selected = form.getlist("resource_selected")
@@ -1107,7 +1113,10 @@ def _apply_plan(form, *, request_export_after=True):
     with REPO_LOCK:
         try:
             revision = coerce_revision(
-                refresh_repo(requested_ref, pin_sha=reviewed_sha),
+                refresh_repo(
+                    requested_ref, pin_sha=reviewed_sha,
+                    **({"allow_main_ancestor": True} if allow_main_ancestor else {}),
+                ),
                 requested_ref,
             )
             if revision.stale or revision.commit_sha != reviewed_sha:
@@ -1434,7 +1443,12 @@ class DashboardAccess:
     def review(self, project, sha=None):
         project = PROJECTS[project] if isinstance(project, str) else project
         with REPO_LOCK:
-            revision = coerce_revision(refresh_repo("main", pin_sha=sha), "main")
+            revision = coerce_revision(
+                refresh_repo(
+                    "main", pin_sha=sha,
+                    **({"allow_main_ancestor": True} if sha else {}),
+                ), "main",
+            )
             if revision.stale or (sha and revision.commit_sha != sha):
                 raise ValueError("Reviewed configuration revision changed")
             releases = release_set(
