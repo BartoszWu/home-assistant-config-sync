@@ -343,6 +343,14 @@ bez syntetycznego requestu Flask. Zachowane są konflikty, provenance, read-back
 cache bust i rollback. Export jest żądany dopiero po końcowej kontroli backendu,
 załadowanej integracji i wszystkich dashboardów. Niepełny staging, nieznany
 protokół lub uszkodzony właściciel wymagają lokalnej kontroli, a nie nowego planu.
+Staging i poprzedni kod są przechowywane w prywatnym katalogu
+`/homeassistant/.config-sync-integrations/<domain>-{stage,previous}`, poza
+`custom_components`: loader HA wykrywa również ukryte katalogi z manifestem.
+Przy odzyskiwaniu zatwierdzonego zadania rozpoczętego na 0.12.0 najpierw
+zatrzymaj Import i przenieś jego dokładne katalogi `.domain-stage` i
+`.domain-previous` do nowych ścieżek bez zmiany zawartości. Wznów to samo zadanie;
+jeśli HA wcześniej wykrył kopię jako integrację, wymagany jest restart Core.
+
 Rollback całego zestawu pozostaje świadomą operacją z backupów, bez automatycznego
 przywracania baz. Schema 1 i eksperymentalny `/data/jdg` z niewydanego PR 0.11.0
 nie są migrowane automatycznie: przerwane próby trzeba najpierw dokończyć/odzyskać

@@ -29,7 +29,7 @@ def release_set(value):
     return release_project(value, JDG)
 
 
-from project_apparmor import NAMES, denied_names
+from project_apparmor import NAMES, RECOVERY_NAMES, denied_names
 
 
 def archive(version="0.7.0", extra=None, project=JDG):
@@ -195,7 +195,7 @@ class DeploymentTest(unittest.TestCase):
         self.installer.target.mkdir()
         (self.installer.target / "__init__.py").write_bytes(b"old")
         before = self.installer.snapshot()
-        self.installer.stage.mkdir()
+        self.installer.stage.mkdir(parents=True)
         for name, data in files.items():
             path = self.installer.stage / name
             path.parent.mkdir(exist_ok=True)
@@ -230,10 +230,47 @@ class DeploymentTest(unittest.TestCase):
                 }
             )
 
-    def test_apparmor_names_allow_only_three_exact_targets(self):
-        patterns = [p.replace("[^", "[!") for p in denied_names()]
+    def test_previous_manifest_cannot_shadow_current_integration(self):
+        files = unpack(*archive(), "0.7.0")
+        self.installer.parent.mkdir()
+        self.installer.target.mkdir()
+        (self.installer.target / "manifest.json").write_text(
+            json.dumps({"domain": "jdg_ksiegowy", "version": "0.6.2"})
+        )
+        self.installer.install(files, self.installer.snapshot())
+        # Core discovers directories by manifest, including hidden names.
+        discovered = [
+            json.loads((p / "manifest.json").read_text())
+            for p in self.installer.parent.iterdir()
+            if p.is_dir() and (p / "manifest.json").is_file()
+        ]
+        self.assertEqual(len(discovered), 1)
+        self.assertEqual(discovered[0]["version"], "0.7.0")
+        self.assertEqual(
+            json.loads((self.installer.previous / "manifest.json").read_text())[
+                "version"
+            ],
+            "0.6.2",
+        )
+
+    def test_recovery_root_symlink_is_rejected(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.installer.recovery.symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.installer.install(
+                unpack(*archive(), "0.7.0"), self.installer.snapshot()
+            )
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_apparmor_names_allow_only_exact_profile_targets(self):
+        for allowed in (NAMES, RECOVERY_NAMES):
+            self.assert_exact_names(allowed)
+
+    def assert_exact_names(self, allowed):
+        patterns = [p.replace("[^", "[!") for p in denied_names(allowed)]
         blocked = lambda name: any(fnmatch.fnmatchcase(name, p) for p in patterns)
-        for name in NAMES:
+        for name in allowed:
             self.assertFalse(blocked(name), name)
             for suffix in ("x", "-extra", ".old"):
                 self.assertTrue(blocked(name + suffix), name + suffix)

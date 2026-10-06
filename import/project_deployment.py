@@ -105,14 +105,18 @@ class Installer:
         self.project = project
         self.parent = Path(ha_root) / "custom_components"
         self.target = self.parent / project.domain
-        self.stage = self.parent / ("." + project.domain + "-stage")
-        self.previous = self.parent / ("." + project.domain + "-previous")
+        # HA scans hidden directories too. Recovery manifests must never be
+        # discovered as a second integration with the same domain.
+        self.recovery = Path(ha_root) / ".config-sync-integrations"
+        self.stage = self.recovery / (project.domain + "-stage")
+        self.previous = self.recovery / (project.domain + "-previous")
 
     def snapshot(self, target=None):
         target = self.target if target is None else target
         if (
             self.parent.parent.is_symlink()
             or self.parent.is_symlink()
+            or self.recovery.is_symlink()
             or target.is_symlink()
         ):
             raise ValueError("Nieprawidłowa ścieżka integracji")
@@ -151,6 +155,7 @@ class Installer:
         if current != reviewed_hash:
             raise ValueError("Integracja zmieniła się po review")
         self.parent.mkdir(exist_ok=True)
+        self.recovery.mkdir(exist_ok=True, mode=0o700)
         for path in (self.stage, self.previous):
             if path.is_symlink():
                 raise ValueError("Nieprawidłowy katalog instalatora")
