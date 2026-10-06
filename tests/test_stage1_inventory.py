@@ -138,3 +138,19 @@ class PublicationGateTests(unittest.TestCase):
             write_json(repo / 'inventory/entities.json', {'schema_version': 999, 'unclassified': 'value'})
             with self.assertRaises(ValueError):
                 validate(repo)
+
+    def test_source_fixtures_do_not_block_safe_dashboard_export(self):
+        import tempfile
+        from sync_dashboards import write_json
+        from validate_export import validate
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            write_json(repo / 'dashboards/dashboard-test.json', {'views': []})
+            # Synthetic identifiers in developer fixtures are not HA snapshots.
+            write_json(repo / 'dashboards/test/fixtures.json',
+                       {'invoice_id': 'a' * 12})
+            validate(repo)
+            write_json(repo / 'config/storage/automations/automation.test.json',
+                       {'nested': {'localKey': 'synthetic'}})
+            with self.assertRaises(ValueError):
+                validate(repo)

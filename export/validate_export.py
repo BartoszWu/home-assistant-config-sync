@@ -84,10 +84,13 @@ def validate(repo):
     runtime = repo / 'inventory/states.json'
     if runtime.exists():
         inventory_values(json.loads(runtime.read_text()))
-    for folder in ('dashboards', 'config/storage'):
-        for path in (repo / folder).rglob('*.json'):
-            if unsafe_reason(json.loads(path.read_text())):
-                raise ValueError('Unsafe configuration snapshot; publication refused')
+    # Export owns flat dashboard snapshots, not the source/fixture directories
+    # maintained through PRs alongside them. Managed configuration is nested.
+    snapshots = list((repo / 'dashboards').glob('*.json'))
+    snapshots.extend((repo / 'config/storage').rglob('*.json'))
+    for path in snapshots:
+        if unsafe_reason(json.loads(path.read_text())):
+            raise ValueError('Unsafe configuration snapshot; publication refused')
     for name in ('dashboards.json', 'export-status.json'):
         path = repo / 'inventory' / name
         if path.exists() and unsafe_reason(json.loads(path.read_text())):
