@@ -1,11 +1,13 @@
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path, PurePosixPath
 
 from flask import Flask, abort, render_template_string, request
 from websocket import create_connection
+from jdg_ui import register as register_jdg
 
 from dashboard_logic import (
     APPLYABLE_STATUSES,
@@ -180,6 +182,7 @@ summary { cursor:pointer; font-weight:650; }
 </style>
 </head>
 <body><main>
+<p><a href="jdg/">Aktualizacja JDG →</a></p>
 <header>
   <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
   <form id="refresh-github-form" method="get">
@@ -606,7 +609,8 @@ def ha_ws_call(message_type, **payload):
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token:
         raise RuntimeError("SUPERVISOR_TOKEN is unavailable.")
-    websocket = create_connection("ws://supervisor/core/websocket", timeout=15)
+    timeout = payload.pop("_timeout", 15)
+    websocket = create_connection("ws://supervisor/core/websocket", timeout=timeout)
     try:
         hello = json.loads(websocket.recv())
         if hello.get("type") != "auth_required":
@@ -761,7 +765,7 @@ def live_provenance_store():
     )
 
 
-def collect_changes(commit_sha="", revision=None):
+def collect_changes(commit_sha="", revision=None, only_relative=None):
     if revision is not None:
         commit_sha = revision.commit_sha
         reviewing_canonical = is_canonical_source(
@@ -779,6 +783,8 @@ def collect_changes(commit_sha="", revision=None):
         return changes
     for github_path in sorted(root.glob("*.json")):
         relative = github_path.name
+        if only_relative is not None and relative != only_relative:
+            continue
         if not valid_relative(relative):
             continue
         if is_ephemeral_dashboard(relative):
@@ -1003,7 +1009,7 @@ def index():
 
 
 @app.route("/apply", methods=["POST"])
-def apply_selected():
+def apply_selected(*, jdg_job=False, request_export_after=True):
     selected = request.form.getlist("selected")
     managed_selected = request.form.getlist("managed_selected")
     resource_selected = request.form.getlist("resource_selected")
@@ -1095,6 +1101,8 @@ def apply_selected():
                     reviewed_sha=reviewed_sha,
                 )
                 results.append({"ok": False, "message": stale_source_message(revision)})
+                if jdg_job:
+                    return results
                 return render_review(results, source=revision)
             entries = managed_entries_for_revision()
             allowed_managed = {entry.path for entry in entries}
@@ -1313,7 +1321,7 @@ def apply_selected():
                     })
         except Exception as exception:
             results.append({"ok": False, "message": f"Apply failed: {exception}"})
-    if applied:
+    if applied and request_export_after:
         try:
             request_export(applied)
             results.append({
@@ -1336,7 +1344,7 @@ def apply_selected():
                 "(managed files are Git → HA only)."
             ),
         })
-    return render_review(results)
+    return results if jdg_job else render_review(results)
 
 
 @app.route("/managed-base", methods=["POST"])
@@ -1399,6 +1407,9 @@ def export_missing_bases():
                 "message": f"Export request failed: {exception}",
             })
     return render_review(results)
+
+
+register_jdg(app, sys.modules[__name__])
 
 
 if __name__ == "__main__":

@@ -261,3 +261,70 @@ report, explainable InfluxDB review candidates, and a small agent summary. User
 InfluxDB decisions live in one private JSON policy; no integration is configured.
 See [Stage 2 contract and offline commands](STAGE2.md) for completeness, baseline,
 revision-aware notifications, candidate review, and runtime-only no-commit behavior.
+
+## Jeden import JDG
+
+Import 0.11.0 dodaje **Aktualizacja JDG → Sprawdź aktualizację → Importuj JDG**.
+Ten zatwierdzany plan łączy backup HA, wersję backendu, integrację i dashboard.
+Zwykły Import nadal odrzuca wszystkie `custom_components` w managed files.
+Osobny instalator obsługuje wyłącznie paczkę z `BartoszWu/ha-jdg-ksiegowy`,
+dokładną listę plików, SHA-256, domenę, wersję i brak zależności pip. AppArmor
+udostępnia tylko katalog JDG i dwa stałe katalogi staging/previous; inne
+integracje i `.storage` pozostają zablokowane. Nie poszerza mapowań ani roli
+Supervisor. Restart Core i przejęcie z HACS należą tylko do zatwierdzonego planu.
+
+Jednorazowo zainstaluj wykonawcę z repo backendu (`deploy/install-deploy-agent.sh`)
+w jego dedykowanym gościu. Skonfiguruj osobny repo-scoped **Contents: read-only**
+token dla backendu. Wykonawca generuje oddzielny losowy klucz deploy, nasłuchuje
+na loopback TCP 3001; po konfiguracji własnego adresu LAN ogranicz dostęp w
+firewallu do HA. Nie używaj tokenu KSeF, klucza encji ani klucza Exportu.
+Nie publikuj kluczy ani konfiguracji połączenia w Git. W lokalnej konfiguracji
+App (`/review` w kontenerze) umieść `jdg-deploy-token` oraz `jdg.json`:
+
+```json
+{
+  "backend_url": "http://<lokalny-wykonawca>:3001",
+  "token_file": "/review/jdg-deploy-token"
+}
+```
+
+Plik klucza ma być zwykłym plikiem w tym samym katalogu, z ograniczonym dostępem.
+Backend nie jest osiągalny przez publiczny Ingress; wykonawca przyjmuje tylko
+wersję, SHA i ID zadania, bez arbitralnych poleceń. Przekierowania HTTP nie
+przenoszą klucza. Poza zaufanym LAN użyj prywatnego tunelu/TLS.
+
+W repo konfiguracji dodaj `deployments/jdg.json`, dokładnie:
+
+```json
+{
+  "schema_version": 1,
+  "backend_version": "0.2.0",
+  "integration_version": "0.7.0"
+}
+```
+
+Te wydania muszą najpierw istnieć. Z tego samego sprawdzonego commita Import
+pobiera `dashboards/dashboard-faktury.json`, `www/dashboard/faktury.mjs` i
+zadeklarowany zasób `/local/dashboard/faktury.mjs`. Nie wybiera najnowszych
+wersji niezależnie. Konflikty i ostrzeżenia blokują skrót; użyj zwykłego review,
+aby je rozwiązać. Integracja JDG musi być już skonfigurowana, backupy HA działające.
+
+Przed zmianą usług Import tworzy przez `backup/generate` kopię HA z bazą danych w skonfigurowanych
+miejscach i sprawdza ukończenie oraz obecność danych. Kopia pomija Apps, aby
+nie zatrzymać własnego wykonawcy; zachowuje ustawione hasło backupu. Dla HACS korzysta tylko z `hacs/repositories/list` i `remove`
+dla dokładnego repo/domeny, potwierdza zachowanie plików. Nie używa uninstall,
+nie usuwa całego HACS i nie edytuje `.storage`. Po przejęciu nie aktualizuj
+JDG także w HACS. Nowy backend jest wdrażany znanym, blokowanym updaterem;
+budowanie nie ma uprawnień root. Kod integracji zamieniany jest po sprawdzeniu
+świeżego hasha, poprzedni katalog zostaje do końcowej kontroli.
+
+Plan i etap są trwałe w `/data/jdg`; przeglądarka może zostać zamknięta.
+Po restarcie App wznawia już zatwierdzony plan. Restart Core zapisuje etap przed
+wysłaniem polecenia i sprawdza załadowaną wersję przez `jdg_ksiegowy/version`.
+Apply korzysta z istniejących konfliktów, provenance, cache bust i Exportu.
+Sukces oznacza potwierdzony backend, załadowaną integrację i stan dashboardu.
+Niepowodzenie pokazuje etap oraz **Wznów import**; nie kasuje dowodów odzyskiwania.
+Niepełny staging lub nieznany protokół zatrzymuje proces i wymaga sprawdzenia.
+Rollback całego zestawu jest świadomą operacją z backupów, a nie automatycznym
+przywróceniem baz danych. Pierwszy bootstrap i próba testowa wymagają osobnego
+uruchomienia; przygotowanie tych zmian nie jest produkcyjnym Import/Apply.

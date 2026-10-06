@@ -115,7 +115,6 @@ apparmor = File.read(File.join(root, "import", "apparmor.txt"), encoding: "UTF-8
 full_deny = "rwmlkx"
 sensitive_dir_denies = {
   ".storage" => true,
-  "custom_components" => true,
   ".cloud" => true,
   "backups" => true,
 }
@@ -185,6 +184,10 @@ import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
+sys.path.insert(0, str(root / "import"))
+from jdg_apparmor import rules
+if rules().strip() not in (root / "import/apparmor.txt").read_text():
+    raise SystemExit("JDG AppArmor exception differs from the three fixed directory names")
 if (root / "export/security.py").read_bytes() != (root / "import/security.py").read_bytes():
     raise SystemExit("Security build-context mirrors differ")
 if (root / "export/deployment_provenance.py").read_bytes() != (root / "import/deployment_provenance.py").read_bytes():

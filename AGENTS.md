@@ -33,9 +33,14 @@ Standalone code checks must not depend on private sibling files.
 
 - Export owns the GitHub write key, with no UI. Import has a distinct read-only
   key and Ingress-only UI. Never weaken the Ingress check or print secrets.
-- No permission expansion, `.storage` access, automatic Core restart or broader
-  host mounts. Managed-file allowlists live in App code, never in home data.
-  Preserve application path guards and AppArmor; synthetic fixtures only.
+- No `.storage` access or broader host mounts. The explicitly reviewed JDG
+  deployment is the only exception to code installation and Core restart:
+  install only the fixed JDG release archive into `custom_components/jdg_ksiegowy`
+  (with fixed staging/previous directories); restart only within its approved,
+  persisted plan after HA backup. HACS takeover may unregister only the JDG repo,
+  never uninstall it. Ordinary managed-file allowlists remain in App code and
+  must reject all `custom_components` paths. Preserve guards and AppArmor;
+  synthetic fixtures only.
 - Apply requires explicit UI approval, immutable reviewed SHA, fresh conflict
   check, atomic writes/rollback and read-back. Feature LIVE must never be
   exported as canonical main. Missing/corrupt provenance after initialization

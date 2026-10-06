@@ -20,6 +20,8 @@ RUN apk add --no-cache \
         "PyYAML==6.0.2"
 
 COPY app.py /app.py
+COPY jdg_ui.py /jdg_ui.py
+COPY jdg_deployment.py /jdg_deployment.py
 COPY dashboard_logic.py /dashboard_logic.py
 COPY diff_view.py /diff_view.py
 COPY review_warnings.py /review_warnings.py
