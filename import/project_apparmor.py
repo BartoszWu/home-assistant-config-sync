@@ -2,20 +2,20 @@
 
 from project_profiles import PROJECTS
 
-NAMES = tuple(
+NAMES = tuple(project.domain for project in PROJECTS.values())
+RECOVERY_NAMES = tuple(
     name
     for project in PROJECTS.values()
     for name in (
-        project.domain,
-        "." + project.domain + "-stage",
-        "." + project.domain + "-previous",
+        project.domain + "-stage",
+        project.domain + "-previous",
     )
 )
 
 
-def denied_names():
+def denied_names(names=NAMES):
     trie = {}
-    for name in NAMES:
+    for name in names:
         node = trie
         for char in name:
             node = node.setdefault(char, {})
@@ -38,10 +38,16 @@ def denied_names():
 
 
 def rules():
-    names = "{" + ",".join(denied_names()) + "}"
-    path = "/homeassistant/custom_components/" + names + "{,/,/**}"
-    return (
-        "  /homeassistant/custom_components/ rw,\n"
-        + "\n".join("  deny " + path + " " + modes + "," for modes in ("rwmlkx", "a"))
-        + "\n"
-    )
+    result = ""
+    for root, allowed in (
+        ("custom_components", NAMES),
+        (".config-sync-integrations", RECOVERY_NAMES),
+    ):
+        names = "{" + ",".join(denied_names(allowed)) + "}"
+        path = "/homeassistant/" + root + "/" + names + "{,/,/**}"
+        result += "  /homeassistant/" + root + "/ rw,\n"
+        result += (
+            "\n".join("  deny " + path + " " + modes + "," for modes in ("rwmlkx", "a"))
+            + "\n"
+        )
+    return result
