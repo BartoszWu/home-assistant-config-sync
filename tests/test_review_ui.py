@@ -92,6 +92,26 @@ class ReviewPresentation(unittest.TestCase):
         self.assertEqual(overview["tone"], "attention")
         self.assertNotEqual(overview["title"], "Wszystko jest aktualne")
 
+    def test_new_available_versions_are_counted_even_with_a_saved_job(self):
+        for state in ("review", "running", "failed"):
+            with self.subTest(state=state):
+                summary = review_summary([], [{"state": state, "has_new_versions": True}])
+                self.assertEqual(summary["updates"], 1)
+                self.assertNotEqual(summary["tone"], "current")
+        summary = review_summary([], [{"state": "review", "has_new_versions": True}])
+        self.assertEqual(summary["title"], "Są nowe rzeczy do wgrania")
+
+    def test_invalid_dashboard_containers_preserve_error_without_crashing_grouping(self):
+        for invalid in (None, [], "bad", 1, {"views": None}, {"views": {}}, {"views": "bad"}, {"views": [None]}, {"views": ["bad"]}):
+            with self.subTest(invalid=invalid):
+                bad = item("dashboard-bad.json", kind="dashboard", status="ERROR", github=invalid, current=invalid)
+                good = item("dashboard-good.json", kind="dashboard", github={"views": [{"title": "Good"}]})
+                groups = configuration_groups([bad, good], [], [])
+                self.assertEqual(groups[0]["changed"][0]["affected_views"], [])
+                self.assertFalse(groups[0]["changed"][0]["selectable"])
+                self.assertEqual(groups[1]["title"], "Good")
+                self.assertEqual(review_summary(groups, [])["attention"], 1)
+
     def test_application_only_update_is_visible_in_initial_summary(self):
         summary = review_summary([], [{"state": "update"}])
         self.assertEqual(summary["updates"], 1)

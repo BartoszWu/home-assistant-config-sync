@@ -241,6 +241,17 @@ small {
   flex-wrap: wrap;
   gap: 8px;
 }
+.version-available {
+  grid-column: 2;
+  color: var(--blue);
+}
+.availability-note {
+  display: block;
+  margin-top: 5px;
+  font-size: 13px;
+  color: var(--blue);
+  font-weight: 600;
+}
 .version-before {
   color: var(--muted);
 }

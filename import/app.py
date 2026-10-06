@@ -25,6 +25,7 @@ from dashboard_logic import (
     is_ephemeral_dashboard,
     matches_preview,
     parse_preview_hashes,
+    valid_dashboard_structure,
 )
 from diff_view import (
     compare_json,
@@ -371,7 +372,19 @@ def collect_changes(commit_sha="", revision=None, only_relative=None):
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
         live_entry = store.dashboards.get(relative)
-        if current is None:
+        invalid_source = (
+            "Git" if not valid_dashboard_structure(github)
+            else "Home Assistant" if current is not None and not valid_dashboard_structure(current)
+            else None
+        )
+        if invalid_source:
+            status, css, selectable = "ERROR", "error", False
+            reason = (
+                f"Nieprawidłowa struktura dashboardu w {invalid_source}. "
+                "Dashboard musi być obiektem JSON, a views listą obiektów."
+            )
+            should_adopt = False
+        elif current is None:
             if registered_paths is None:
                 registered_paths = ha_registered_url_paths()
             url_path = dashboard_url_path(relative)

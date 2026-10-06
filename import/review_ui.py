@@ -2,6 +2,7 @@
 
 from pathlib import Path, PurePosixPath
 
+from dashboard_logic import valid_dashboard_structure
 from diff_view import is_changed_review
 
 STATUS_LABELS = {
@@ -32,10 +33,15 @@ def topic_slug(relative):
     return "temperatura" if stem == "temperature" else stem
 
 
+def dashboard_data(value):
+    """Invalid containers keep their collector error, with no guessed tab names."""
+    return value if valid_dashboard_structure(value) else {}
+
+
 def affected_dashboard_views(item):
     """Describe changed tabs from compared JSON, without interpreting card code."""
-    current = (item.get("current") or {}).get("views") or []
-    desired = (item.get("github") or {}).get("views") or []
+    current = dashboard_data(item.get("current")).get("views", [])
+    desired = dashboard_data(item.get("github")).get("views", [])
     names = []
     for views, other in ((desired, current), (current, desired)):
         for view in views:
@@ -55,7 +61,7 @@ def configuration_groups(dashboards, managed, resources):
                 "changed": [], "unchanged": [],
             })
             if kind == "dashboard":
-                value = item.get("github") or {}
+                value = dashboard_data(item.get("github"))
                 views = value.get("views") or []
                 title = value.get("title") or (views[0].get("title") if len(views) == 1 else None)
                 if isinstance(title, str) and title.strip():
@@ -85,7 +91,7 @@ def review_summary(groups, projects, *, incomplete=False):
     items = [item for group in groups for item in group["changed"]]
     ready = sum(bool(i["selectable"]) for i in items)
     attention = sum(not i["selectable"] or bool(i.get("warnings")) for i in items)
-    updates = sum(p["state"] == "update" for p in projects)
+    updates = sum(p["state"] == "update" or bool(p.get("has_new_versions")) for p in projects)
     missing_base = sum(
         i["status"] == "IN SYNC — BASE NOT INITIALIZED"
         for g in groups for i in g["unchanged"]
@@ -97,10 +103,10 @@ def review_summary(groups, projects, *, incomplete=False):
         title, tone = "Zmiany wymagają uwagi", "attention"
     elif any(p["state"] == "running" for p in projects):
         title, tone = "Aktualizacja w toku", "update"
-    elif any(p["state"] == "review" for p in projects):
-        title, tone = "Plan aktualizacji czeka na decyzję", "update"
     elif ready or updates:
         title, tone = "Są nowe rzeczy do wgrania", "update"
+    elif any(p["state"] == "review" for p in projects):
+        title, tone = "Przygotowana aktualizacja czeka na decyzję", "update"
     elif missing_base:
         title, tone = "Konfiguracja zgodna, uzupełnij bazę", "attention"
     elif project_attention:

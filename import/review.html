@@ -112,19 +112,24 @@
 <div>
 <h3>{{ project.title }}</h3>
 <span class="small">{{ project.description }}</span>
+{% if project.has_new_versions %}<span class="availability-note">Dostępny nowy zestaw wersji</span>{% elif project.availability_unknown %}<span class="small">Nie udało się sprawdzić dostępnych wersji</span>{% endif %}
 </div>
 </div>
 <div class="version-list">{% for component in project.components %}
 <div class="version-line">
 <span>{{ component.label }}</span>
-<span class="version-change">{% if component.current %}
+<span class="version-change">{% if component.current and component.current == component.target and component.available_target %}
+<span class="version-target"><span class="small">obecne i przygotowane </span>{{ component.current }}</span>
+{% else %}{% if component.current %}
 <span class="{% if component.target and component.current != component.target %}version-before{% endif %}">{{ component.current }}</span>{% else %}
 <span class="version-unknown">Nieznana</span>{% endif %}
 {% if component.target and component.current != component.target %}
-<span class="version-arrow" aria-hidden="true">→</span>
+{% if component.current != component.target %}<span class="version-arrow" aria-hidden="true">→</span>{% endif %}
 <span class="version-target">
 <span class="small">{{ component.target_label or "w konfiguracji" }} </span>{{ component.target }}</span>{% endif %}
-</span>
+{% endif %}</span>
+{% if component.available_target %}
+<span class="version-available"><span class="small">Dostępne w konfiguracji </span><strong>{{ component.available_target }}</strong></span>{% endif %}
 </div>{% endfor %}
 </div>
 <div class="app-action">

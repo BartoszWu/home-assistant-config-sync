@@ -223,6 +223,7 @@ def register(
             configured = config.is_file()
             backend_version = integration_version = None
             job = None
+            pinned_target = None
             read_error = False
             if canonical:
                 # Do not use get_manager: opening this list must never launch work.
@@ -238,7 +239,7 @@ def register(
                     ):
                         raise ValueError("Invalid saved project plan")
                     if job and job["status"] in {"review", "running", "failed"}:
-                        target = release_set(job["releases"], project)
+                        pinned_target = release_set(job["releases"], project)
                 except Exception:
                     job = None
                     read_error = True
@@ -258,13 +259,21 @@ def register(
                     version = loaded.get("version")
                     if isinstance(version, str) and VERSION.fullmatch(version):
                         integration_version = version
-            target_label = "w planie" if job and job["status"] in {"review", "running", "failed"} else "w konfiguracji"
-            components = [
-                {"label": "Usługa", "current": backend_version, "target_label": target_label,
-                 "target": target.get("backend_version") if target else None},
-                {"label": "Integracja HA", "current": integration_version, "target_label": target_label,
-                 "target": target.get("integration_version") if target else None},
-            ]
+            displayed_target = pinned_target or target
+            target_label = "przygotowane" if pinned_target else "w konfiguracji"
+            components = []
+            for label, key, current in (
+                ("Usługa", "backend_version", backend_version),
+                ("Integracja HA", "integration_version", integration_version),
+            ):
+                version = displayed_target.get(key) if displayed_target else None
+                available = target.get(key) if pinned_target and target else None
+                components.append({
+                    "label": label, "current": current, "target_label": target_label,
+                    "target": version,
+                    "available_target": available if available != version else None,
+                })
+            has_new_versions = any(c["available_target"] for c in components)
             state, label, action = "same", "Bez zmian", "Otwórz"
             description = "Wersje zgodne z konfiguracją"
             if not canonical:
@@ -277,7 +286,7 @@ def register(
                 state = job["status"]
                 label = LABELS[state]
                 action = "Wznów import" if state == "failed" else "Otwórz plan"
-                description = "Zapisany plan / " + job["source_sha"][:7]
+                description = "Przygotowany zestaw / " + job["source_sha"][:7]
             elif not configured:
                 state, label = "unconfigured", "Połącz wykonawcę"
                 description = "Potrzebna jednorazowa konfiguracja"
@@ -291,6 +300,8 @@ def register(
                 "id": project.id, "title": project.title, "state": state,
                 "status_label": label, "action_label": action,
                 "description": description, "components": components,
+                "has_new_versions": has_new_versions,
+                "availability_unknown": bool(pinned_target and not target),
             })
         return result
 

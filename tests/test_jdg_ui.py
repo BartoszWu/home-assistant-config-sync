@@ -269,7 +269,34 @@ class UI(unittest.TestCase):
         project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
         self.assertEqual(project["state"], "review")
         self.assertEqual(project["components"][0]["target"], "0.3.0")
-        self.assertEqual(project["components"][1]["target_label"], "w planie")
+        self.assertEqual(project["components"][1]["target_label"], "przygotowane")
+
+    def test_new_versions_remain_visible_beside_each_active_pinned_job(self):
+        self.client.post("/projects/jdg/review")
+        original = self.manager().read()
+        for status in ("review", "running", "failed"):
+            with self.subTest(status=status):
+                original["status"] = status
+                self.manager().save(original)
+                self.backend.calls.clear()
+                self.actions.clear()
+                project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
+                self.assertEqual(project["state"], status)
+                self.assertTrue(project["has_new_versions"])
+                self.assertEqual([c["target"] for c in project["components"]], ["0.3.0", "0.7.0"])
+                self.assertEqual([c["available_target"] for c in project["components"]], ["0.4.0", "0.8.0"])
+                self.assertEqual(self.manager().read(), original)
+                self.assertEqual(self.backend.calls, [("/status", None)])
+                self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
+
+    def test_pending_job_does_not_invent_available_versions_when_targets_are_missing(self):
+        self.client.post("/projects/jdg/review")
+        project = self.app.extensions["project_overview"]({"jdg": None})[0]
+        self.assertEqual(project["state"], "review")
+        self.assertTrue(project["availability_unknown"])
+        self.assertFalse(project["has_new_versions"])
+        self.assertTrue(all(c["available_target"] is None for c in project["components"]))
+        self.assertEqual(project["components"][0]["target"], "0.3.0")
 
     def test_pending_plan_keeps_its_recovery_link(self):
         self.client.post("/projects/jdg/review")

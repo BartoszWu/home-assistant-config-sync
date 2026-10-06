@@ -78,6 +78,14 @@ def _contains_only_empty_heading_cards(cards):
     return True
 
 
+def valid_dashboard_structure(config):
+    """Validate only the container shapes used by dashboard review, not card schemas."""
+    if not isinstance(config, dict):
+        return False
+    views = config.get("views", [])
+    return isinstance(views, list) and all(isinstance(view, dict) for view in views)
+
+
 def is_empty_dashboard(config):
     """Recognize a new dashboard shell without relying on one exact JSON hash."""
     if not isinstance(config, dict) or set(config) - ROOT_KEYS:

@@ -130,7 +130,10 @@ are read-only status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
 remain unknown. Saved pending/failed jobs retain their recovery link; a previous
 successful job never substitutes for current version checks. Pending plans show
-their own pinned target versions, labelled **w planie**. Application
+their own pinned target versions, labelled **przygotowane**, alongside any
+other available versions from the reviewed configuration. A new version set
+remains visible without replacing or approving the saved job. If the reviewed
+configuration is unavailable, that check is explicitly marked unknown. Application
 updates still require their separate review and explicit approval. Feature
 branches and explicit commit reviews do not offer application updates from a
 different source.
@@ -140,7 +143,9 @@ subject, including the affected dashboard tabs when JSON identifies them. Files,
 content fingerprints, original statuses and LIVE provenance
 are available in **Szczegóły**. There is no rendered content diff, line count or
 duplicate file index. Unchanged items and source controls are collapsed. Partial
-read failures never produce an all-current summary.
+read failures never produce an all-current summary. A dashboard with an invalid
+JSON container structure is marked as an individual error and cannot be applied;
+other valid dashboard items remain available for review.
 
 **Zaznacz gotowe zmiany** selects eligible dashboards, managed files and Lovelace
 resources together. Items with security warnings require individual selection

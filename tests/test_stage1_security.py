@@ -172,6 +172,65 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         self.assertEqual(targets['jdg']['backend_version'], '0.4.0')
         self.assertTrue(provider.call_args.kwargs['canonical'])
 
+    def test_invalid_dashboard_shapes_are_item_errors_and_do_not_break_healthy_items(self):
+        app = self.app_module
+        invalid_path = self.repo / 'dashboards/invalid.json'
+        for invalid in (None, [], "bad", 1, {'views': None}, {'views': {}}, {'views': "bad"}, {'views': [None]}, {'views': ["bad"]}):
+            with self.subTest(invalid=invalid):
+                invalid_path.write_text(json.dumps(invalid))
+                changes = {c['relative']: c for c in app.collect_changes(revision=fake_revision())}
+                self.assertEqual(changes['invalid.json']['status'], 'ERROR')
+                self.assertFalse(changes['invalid.json']['selectable'])
+                self.assertTrue(changes['test.json']['selectable'])
+                response = app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                self.assertIn('Nieprawidłowa struktura dashboardu w Git', html)
+                self.assertIsNone(re.search(r'<input[^>]+name="selected"[^>]+value="invalid.json"', html))
+                self.assertIsNotNone(re.search(r'<input[^>]+name="selected"[^>]+value="test.json"', html))
+
+    def test_invalid_live_dashboard_is_blocked_without_hiding_other_dashboards(self):
+        app = self.app_module
+        other = self.repo / 'dashboards/healthy.json'
+        other.write_text(json.dumps(self.desired))
+        with patch.object(app, 'ha_dashboard_config', side_effect=lambda name: {'views': [None]} if name == 'test.json' else self.live):
+            changes = {c['relative']: c for c in app.collect_changes(revision=fake_revision())}
+            self.assertEqual(changes['test.json']['status'], 'ERROR')
+            self.assertIn('Home Assistant', changes['test.json']['reason'])
+            self.assertTrue(changes['healthy.json']['selectable'])
+            self.assertEqual(app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).status_code, 200)
+
+    def test_forged_selection_of_invalid_dashboard_is_rejected_by_fresh_apply_check(self):
+        app = self.app_module
+        invalid = {'views': [None]}
+        self.path.write_text(json.dumps(invalid))
+        self.form['desired_hash'] = 'test.json:' + app.digest(invalid)
+        with patch.object(app, 'save_dashboard') as save, patch.object(app, 'request_export') as export:
+            response = self.submit()
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('blocked by fresh conflict-check (ERROR)', response.get_data(as_text=True))
+            save.assert_not_called()
+            export.assert_not_called()
+
+    def test_pending_application_renders_pinned_and_available_versions_separately(self):
+        app = self.app_module
+        project = {
+            'id': 'jdg', 'title': 'JDG', 'state': 'review', 'status_label': 'Do zatwierdzenia',
+            'action_label': 'Otwórz plan', 'description': 'Przygotowany zestaw / abcdef1',
+            'has_new_versions': True, 'components': [
+                {'label': 'Usługa', 'current': '0.1.0', 'target': '0.3.0', 'target_label': 'przygotowane', 'available_target': '0.4.0'},
+                {'label': 'Integracja HA', 'current': '0.7.0', 'target': '0.7.0', 'target_label': 'przygotowane', 'available_target': '0.8.0'},
+            ],
+        }
+        with patch.dict(app.app.extensions, {'project_overview': lambda *args, **kwargs: [project]}):
+            html = app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).get_data(as_text=True)
+        self.assertIn('Dostępny nowy zestaw wersji', html)
+        self.assertIn('przygotowane </span>0.3.0', html)
+        self.assertIn('obecne i przygotowane </span>0.7.0', html)
+        self.assertIn('Dostępne w konfiguracji </span><strong>0.4.0</strong>', html)
+        self.assertIn('Dostępne w konfiguracji </span><strong>0.8.0</strong>', html)
+        self.assertIn('href="projects/jdg/"', html)
+
     def test_partial_review_error_leaves_all_apply_inputs_disabled(self):
         app = self.app_module
         with patch.object(app, 'managed_entries_for_revision', side_effect=ValueError('synthetic read failed')):
