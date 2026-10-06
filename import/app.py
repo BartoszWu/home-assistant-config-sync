@@ -7,6 +7,7 @@ from pathlib import Path, PurePosixPath
 from flask import Flask, abort, render_template_string, request
 from websocket import create_connection
 from project_ui import register as register_projects
+from review_ui import TEMPLATE, STYLE, SCRIPT, configuration_groups, review_summary
 from project_deployment import Coordinator, DeploymentBusy, release_set
 from project_profiles import PROJECTS
 from dashboard_sync import DashboardSync
@@ -24,13 +25,12 @@ from dashboard_logic import (
     is_ephemeral_dashboard,
     matches_preview,
     parse_preview_hashes,
+    valid_dashboard_structure,
 )
 from diff_view import (
     compare_json,
     file_anchor,
-    is_changed_review,
     json_lines,
-    summarize_changed_files,
 )
 from git_source import (
     DEFAULT_SOURCE_REF,
@@ -97,433 +97,6 @@ else:
     MANAGED_POLICY_ERROR = None
 
 
-TEMPLATE = r"""
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HA Config Sync — Import</title>
-<style>
-:root {
-  color-scheme: light dark;
-  --page-background:#f4f6f8; --text-color:#202124; --card-background:white;
-  --muted-color:#687078; --same-background:#e8eaed; --same-text:#202124;
-  --ready-background:#d8f3dc; --ready-text:#165a2e;
-  --changed-background:#fff0c2; --changed-text:#624b00;
-  --error-background:#ffd6d6; --error-text:#7a1717;
-  --result-background:#d8f3dc; --result-text:#165a2e;
-  --result-bad-background:#ffd6d6; --result-bad-text:#7a1717;
-  --reason-background:#fff4d6; --reason-text:#624b00;
-}
-body { font-family: system-ui,-apple-system,sans-serif; margin:0; background:var(--page-background); color:var(--text-color); }
-main { max-width:1400px; margin:auto; padding:24px; }
-header { display:flex; justify-content:space-between; align-items:center; gap:20px; margin-bottom:20px; }
-h1 { margin:0 0 4px; }
-button { padding:10px 18px; border:0; border-radius:8px; cursor:pointer; background:#03a9f4; color:white; font-weight:650; }
-button[disabled] { opacity:.45; cursor:not-allowed; }
-.card { background:var(--card-background); border-radius:12px; padding:18px; margin-bottom:16px; box-shadow:0 1px 4px #0002; }
-.meta { display:grid; grid-template-columns:max-content 1fr; gap:5px 12px; }
-.small { color:var(--muted-color); font-size:13px; }
-.status { display:inline-block; padding:4px 9px; border-radius:12px; font-size:12px; font-weight:750; margin-left:7px; }
-.same { background:var(--same-background); color:var(--same-text); }
-.ready { background:var(--ready-background); color:var(--ready-text); }
-.bootstrap { background:var(--ready-background); color:var(--ready-text); }
-.changed { background:var(--changed-background); color:var(--changed-text); }
-.missing-base { background:var(--changed-background); color:var(--changed-text); }
-.conflict,.unsafe,.error { background:var(--error-background); color:var(--error-text); }
-.result { padding:12px 14px; border-radius:8px; margin-bottom:10px; background:var(--result-background); color:var(--result-text); }
-.result.bad { background:var(--result-bad-background); color:var(--result-bad-text); }
-.reason { padding:10px 12px; border-radius:8px; background:var(--reason-background); color:var(--reason-text); }
-.change-head { display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
-input[type=checkbox] { transform:scale(1.25); }
-details { margin-top:14px; }
-summary { cursor:pointer; font-weight:650; }
-.card[id] { scroll-margin-top: 16px; }
-.counts { margin-left:auto; font-size:13px; color:var(--muted-color); }
-.counts .add { color:#1a7f37; font-weight:650; }
-.counts .del { color:#d1242f; font-weight:650; }
-.files-changed h2 { margin:0 0 6px; }
-.file-list { list-style:none; margin:12px 0 0; padding:0; border-top:1px solid #d9dde1; }
-.file-list a { display:flex; gap:12px; align-items:center; flex-wrap:nowrap; padding:10px 0; text-decoration:none; color:inherit; border-bottom:1px solid #eceff1; }
-.file-list a:hover { background:#eef3f7; }
-.file-list .path { font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.unchanged-files { margin-top:20px; }
-.bulk-select { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-.bulk-select label { display:flex; align-items:center; gap:10px; font-weight:650; cursor:pointer; }
-.actions { position:sticky; bottom:0; display:flex; gap:8px; justify-content:flex-end; padding-top:12px; }
-[hidden] { display:none !important; }
-.apply-progress { display:none; align-items:center; gap:9px; margin-right:12px; padding:9px 12px; border-radius:8px; background:#e3f2fd; color:#174f78; font-weight:650; }
-.apply-progress.visible { display:flex; }
-.refresh-progress { position:fixed; inset:0; z-index:40; display:none; align-items:center; justify-content:center; background:rgba(15,18,22,.28); cursor:wait; }
-.refresh-progress.visible { display:flex; }
-.refresh-progress-card { display:flex; align-items:center; gap:12px; padding:16px 20px; border-radius:12px; background:var(--card-background); box-shadow:0 8px 28px #0004; font-weight:650; }
-.refresh-progress .spinner { width:22px; height:22px; border-width:3px; }
-.source-form { display:flex; flex-wrap:wrap; gap:12px 18px; align-items:end; }
-.source-form label { display:flex; flex-direction:column; gap:4px; font-size:13px; font-weight:650; }
-.source-form select, .source-form input[type=text] { padding:8px 10px; border-radius:8px; border:1px solid #d9dde1; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; min-width:220px; background:var(--card-background); color:var(--text-color); }
-.source-resolved { font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; }
-.stale { background:var(--error-background); color:var(--error-text); padding:10px 12px; border-radius:8px; }
-.spinner { width:16px; height:16px; border:3px solid #8bcdf1; border-top-color:#0277bd; border-radius:50%; animation:spin .75s linear infinite; }
-@keyframes spin { to { transform:rotate(360deg); } }
-@media (prefers-color-scheme:dark) {
-  :root {
-    --page-background:#111418; --text-color:#e8eaed; --card-background:#202428;
-    --muted-color:#aab0b6; --same-background:#30363d; --same-text:#e8eaed;
-    --ready-background:#1f5130; --ready-text:#d8f3dc;
-    --changed-background:#5b4811; --changed-text:#fff0c2;
-    --error-background:#57272a; --error-text:#ffd6d6;
-    --result-background:#1f5130; --result-text:#d8f3dc;
-    --result-bad-background:#57272a; --result-bad-text:#ffd6d6;
-    --reason-background:#5b4811; --reason-text:#fff0c2;
-  }
-  .file-list { border-color:#30353a; }
-  .file-list a { border-color:#30353a; }
-  .file-list a:hover { background:#252a2f; }
-  .counts .add { color:#3fb950; }
-  .counts .del { color:#f85149; }
-  .refresh-progress { background:rgba(0,0,0,.48); }
-}
-</style>
-</head>
-<body><main>
-<p><a href="projects/">Aktualizacje projektów →</a></p>
-<header>
-  <div><h1>HA Config Sync — Import</h1><div class="small">Dashboards + managed files · GitHub read-only · Apply via HA API / allowlisted FS · Export after verified dashboard Apply</div></div>
-  <form id="refresh-github-form" method="get">
-    {% if git_source and git_source.source_kind == 'commit' %}
-    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
-    {% elif git_source %}
-    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
-    {% endif %}
-    <button id="refresh-button" type="submit">Refresh GitHub</button>
-  </form>
-</header>
-
-<section class="card" id="source">
-  <h2 style="margin-top:0">Source</h2>
-  <p class="small">Default is <code>main</code>. Choosing a feature branch does not merge, does not push, and does not change the saved default. Review and Apply use one pinned commit SHA.</p>
-  <form id="source-form" method="get" class="source-form">
-    <label>Branch
-      <select name="source" aria-label="Source branch">
-        {% for name in (git_source.available_branches if git_source else ['main']) %}
-        <option value="{{ name }}" {% if git_source and git_source.source_kind == 'branch' and git_source.source_ref == name %}selected{% endif %}>{{ name }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <label>Commit SHA (optional)
-      <input type="text" name="source_sha" value="{{ git_source.source_ref if git_source and git_source.source_kind == 'commit' else '' }}" pattern="[0-9a-f]{40}" placeholder="40-character SHA" spellcheck="false" autocomplete="off" aria-label="Optional commit SHA">
-    </label>
-    <button id="refresh-source-button" type="submit">Refresh source</button>
-  </form>
-  <p class="source-resolved" style="margin:12px 0 0">
-    Source: <code>{{ git_source.source_ref if git_source else 'main' }}</code>
-    · Resolved commit: <code>{{ git_source.short_sha if git_source else '-' }}</code>
-    {% if git_source and git_source.commit_sha %}<span class="small">({{ git_source.commit_sha }})</span>{% endif %}
-  </p>
-  {% if git_source and git_source.stale %}
-  <p class="stale"><strong>SOURCE UPDATED — REFRESH REVIEW</strong><br>
-    Branch HEAD changed:
-    reviewed <code>{{ git_source.reviewed_sha[:7] if git_source.reviewed_sha else '?' }}</code>
-    · current <code>{{ git_source.short_sha }}</code>
-    Apply was not performed.</p>
-  {% endif %}
-</section>
-
-{% if error %}<div class="card error"><strong>Error:</strong> {{ error }}</div>{% else %}
-<div class="card meta">
-  <strong>Repository:</strong><span>BartoszWu/home-assistant-config</span>
-  <strong>Source:</strong><span>{{ git_source.source_ref }} @ {{ git_source.short_sha }}</span>
-  <strong>Base state:</strong><span>state/dashboard-bases.json (dashboards) · /data/managed-file-bases.json (managed files)</span>
-</div>
-
-{% if managed_policy_error %}
-<div class="card error"><strong>Managed files policy error:</strong> {{ managed_policy_error }}</div>
-{% endif %}
-{% if resource_error %}
-<div class="card error"><strong>Lovelace resources:</strong> {{ resource_error }}</div>
-{% endif %}
-
-{% for result in results or [] %}
-<div class="result {% if not result.ok %}bad{% endif %}">{{ result.message }}</div>
-{% endfor %}
-
-{% if has_missing_base or has_managed_missing_base %}
-<section class="card">
-  <h3 style="margin-top:0">Base initialization needed</h3>
-  {% if has_missing_base %}
-  <p>Dashboard: GitHub and Home Assistant already match, but no exported base hash exists.</p>
-  <form method="post" action="export" style="margin-bottom:12px">
-    {% if git_source and git_source.source_kind == 'commit' %}
-    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
-    {% elif git_source %}
-    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
-    {% endif %}
-    <button type="submit">Request Export to initialize dashboard base</button>
-  </form>
-  {% endif %}
-  {% if has_managed_missing_base %}
-  <p>Managed files: GitHub and HA already match, but no Import base hash exists.</p>
-  <form method="post" action="managed-base">
-    {% if git_source and git_source.source_kind == 'commit' %}
-    <input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
-    {% elif git_source %}
-    <input type="hidden" name="source" value="{{ git_source.source_ref }}">
-    {% endif %}
-    <button type="submit">Initialize managed-file bases</button>
-  </form>
-  {% endif %}
-</section>
-{% endif %}
-
-{% macro dashboard_card(change) -%}
-<section class="card" id="{{ change.anchor }}">
-  <div class="change-head">
-    {% if change.selectable %}
-    <input type="checkbox" name="selected" value="{{ change.relative }}" aria-label="Select {{ change.name }}" {% if not change.warnings %}data-bulk-selectable{% endif %}>
-    <input type="hidden" name="preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
-    <input type="hidden" name="desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
-    {% endif %}
-    <h3 style="margin:0">{{ change.name }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
-    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
-  </div>
-  <div class="small">Dashboard · dashboards/{{ change.relative }} · review {{ git_source.short_sha if git_source else '-' }}</div>
-  <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
-  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
-  {% if change.warnings %}
-  <p class="reason">Security scan warning — this does not block Apply. Review the flagged content in GitHub, then select manually if you still want Git → HA.
-    {% for warning in change.warnings %}<br>{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
-  </p>
-  {% endif %}
-</section>
-{%- endmacro %}
-
-{% macro managed_card(change) -%}
-<section class="card" id="{{ change.anchor }}">
-  <div class="change-head">
-    {% if change.selectable %}
-    <input type="checkbox" name="managed_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}" {% if not change.warnings %}data-bulk-selectable{% endif %}>
-    <input type="hidden" name="managed_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
-    <input type="hidden" name="managed_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
-    {% endif %}
-    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span>{% if change.warnings %} <span class="status changed">WARNING</span>{% endif %}</h3>
-    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
-  </div>
-  <div class="small">Profile · {{ change.profile }} · review {{ git_source.short_sha if git_source else '-' }} · LIVE {{ change.live_hash or 'absent' }} · Git {{ change.github_hash or '-' }} · BASE {{ change.base or 'none' }}</div>
-  <div class="small">LIVE provenance: <strong>{{ change.provenance_label or 'CANONICAL MAIN' }}</strong>{% if change.live_source_ref %} · Source: <code>{{ change.live_source_ref }}</code> · Commit: <code>{{ change.live_short_sha }}</code>{% endif %}</div>
-  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
-  {% if change.warnings %}
-  <p class="reason">Security scan warning — this does not block Apply. Review the flagged content in GitHub, then select manually if you still want Git → HA.
-    {% for warning in change.warnings %}<br>{{ warning.reason }}{% if warning.field %} (<code>{{ warning.field }}</code>){% endif %}{% if warning.path and warning.path != '$' %} at <code>{{ warning.path }}</code>{% endif %}{% endfor %}
-  </p>
-  {% endif %}
-  {% if change.staging and change.staging.preview_url %}
-  <p class="small">Staged frontend preview (does not replace production): <code>{{ change.staging.preview_url }}</code></p>
-  {% endif %}
-  {% if change.staging and change.staging.error %}
-  <p class="reason">Staging unavailable: {{ change.staging.error }}</p>
-  {% endif %}
-</section>
-{%- endmacro %}
-
-{% macro resource_card(change) -%}
-<section class="card" id="{{ change.anchor }}">
-  <div class="change-head">
-    {% if change.selectable %}
-    <input type="checkbox" name="resource_selected" value="{{ change.relative }}" aria-label="Select {{ change.relative }}" data-bulk-selectable>
-    <input type="hidden" name="resource_preview_hash" value="{{ change.relative }}:{{ change.preview_ha_hash }}">
-    <input type="hidden" name="resource_desired_hash" value="{{ change.relative }}:{{ change.preview_desired_hash }}">
-    {% endif %}
-    <h3 style="margin:0">{{ change.relative }} <span class="status {{ change.css }}">{{ change.status }}</span></h3>
-    <span class="counts"><span class="add">+{{ change.added }}</span> · <span class="del">−{{ change.removed }}</span></span>
-  </div>
-  <div class="small">Lovelace resource · type <code>{{ change.resource_type }}</code> · review {{ git_source.short_sha if git_source else '-' }}</div>
-  {% if change.reason %}<p class="reason">{{ change.reason }}</p>{% endif %}
-</section>
-{%- endmacro %}
-
-<form id="apply-form" method="post" action="apply">
-{% if git_source %}
-<input type="hidden" name="source" value="{{ git_source.source_ref if git_source.source_kind == 'branch' else 'main' }}">
-{% if git_source.source_kind == 'commit' %}
-<input type="hidden" name="source_sha" value="{{ git_source.source_ref }}">
-{% endif %}
-<input type="hidden" name="reviewed_sha" value="{{ git_source.commit_sha }}">
-{% endif %}
-{% if not changes and not managed_changes and not resource_changes %}<div class="card"><h2>No reviewable items</h2><p>Add dashboard JSON under <code>dashboards/</code>, managed files listed in Import policy, or declared Lovelace resources.</p></div>{% endif %}
-{% if has_ready %}
-<div class="card bulk-select" id="bulk-select" hidden>
-  <label for="select-all-ready"><input id="select-all-ready" type="checkbox">Select all ready items</label>
-  <span id="selection-count" class="small" role="status" aria-live="polite"></span>
-  <span class="small">Items with security warnings need individual selection.</span>
-</div>
-{% endif %}
-{% if file_summary.count %}
-<nav class="card files-changed" aria-label="Changed files">
-  <h2>Changed files</h2>
-  <p class="small">{{ file_summary.count }} file{% if file_summary.count != 1 %}s{% endif %}
-    · <span class="counts"><span class="add">+{{ file_summary.added }}</span> · <span class="del">−{{ file_summary.removed }}</span></span></p>
-  <ul class="file-list">
-    {% for item in file_summary.files %}
-    <li>
-      <a href="#{{ item.anchor }}">
-        <span class="path">{{ item.path }}</span>
-        <span class="counts"><span class="add">+{{ item.added }}</span> <span class="del">−{{ item.removed }}</span></span>
-        <span class="status {{ item.css }}">{{ item.status }}</span>
-      </a>
-    </li>
-    {% endfor %}
-  </ul>
-</nav>
-{% endif %}
-{% if changed_dashboards %}<h2>Dashboards</h2>{% endif %}
-{% for change in changed_dashboards %}{{ dashboard_card(change)|safe }}{% endfor %}
-
-{% if changed_managed %}
-<h2>Managed files</h2>
-<p class="small">Desired state is Git → HA only. Bases live in Import <code>/data</code>. No automatic Export of these files.</p>
-{% for change in changed_managed %}{{ managed_card(change)|safe }}{% endfor %}
-{% endif %}
-
-{% if changed_resources %}
-<h2>Lovelace resources</h2>
-<p class="small">Declared in Import <code>managed_files.yaml</code>. Apply creates a missing resource; a type mismatch stays a conflict.</p>
-{% for change in changed_resources %}{{ resource_card(change)|safe }}{% endfor %}
-{% endif %}
-
-{% if unchanged_dashboards or unchanged_managed or unchanged_resources %}
-<details class="unchanged-files">
-  <summary>Unchanged files ({{ unchanged_count }})</summary>
-  {% if unchanged_dashboards %}<h2>Dashboards</h2>{% endif %}
-  {% for change in unchanged_dashboards %}{{ dashboard_card(change)|safe }}{% endfor %}
-  {% if unchanged_managed %}
-  <h2>Managed files</h2>
-  {% for change in unchanged_managed %}{{ managed_card(change)|safe }}{% endfor %}
-  {% endif %}
-  {% if unchanged_resources %}
-  <h2>Lovelace resources</h2>
-  {% for change in unchanged_resources %}{{ resource_card(change)|safe }}{% endfor %}
-  {% endif %}
-</details>
-{% endif %}
-<div class="actions">
-  <button id="cancel-button" type="reset">Cancel</button>
-  <div id="apply-progress" class="apply-progress" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span><span>Applying and verifying…</span></div>
-  <button id="apply-button" type="submit" {% if not has_ready %}disabled{% endif %}>Apply selected</button>
-</div>
-</form>
-{% endif %}
-</main>
-<div id="refresh-progress" class="refresh-progress" role="status" aria-live="polite">
-  <div class="refresh-progress-card">
-    <span class="spinner" aria-hidden="true"></span>
-    <span data-busy-label>Refreshing GitHub…</span>
-  </div>
-</div>
-<script>
-function pageIsBusy() {
-  return document.body.dataset.busy === 'true';
-}
-
-function markPageBusy(message) {
-  if (pageIsBusy()) return false;
-  document.body.dataset.busy = 'true';
-  document.body.setAttribute('aria-busy', 'true');
-  const progress = document.getElementById('refresh-progress');
-  if (progress) {
-    const label = progress.querySelector('[data-busy-label]');
-    if (label && message) label.textContent = message;
-    progress.classList.add('visible');
-  }
-  ['refresh-button', 'refresh-source-button', 'apply-button', 'cancel-button', 'select-all-ready'].forEach(id => {
-    const button = document.getElementById(id);
-    if (button) button.disabled = true;
-  });
-  const refreshButton = document.getElementById('refresh-button');
-  const sourceButton = document.getElementById('refresh-source-button');
-  if (refreshButton) refreshButton.textContent = 'Refreshing…';
-  if (sourceButton) sourceButton.textContent = 'Refreshing…';
-  return true;
-}
-
-function submitAfterPaint(form) {
-  window.setTimeout(() => form.submit(), 50);
-}
-
-function bindBusySubmit(form, message) {
-  if (!form) return;
-  form.addEventListener('submit', event => {
-    event.preventDefault();
-    if (!markPageBusy(message)) return;
-    submitAfterPaint(form);
-  });
-}
-
-bindBusySubmit(document.getElementById('refresh-github-form'), 'Refreshing GitHub…');
-bindBusySubmit(document.getElementById('source-form'), 'Refreshing source…');
-
-const form = document.getElementById('apply-form');
-if (form) {
-  const selectable = [...form.querySelectorAll('input[data-bulk-selectable]')];
-  const selectionInputs = [...form.querySelectorAll('input[name="selected"], input[name="managed_selected"], input[name="resource_selected"]')];
-  const bulkSelect = document.getElementById('bulk-select');
-  const selectAll = document.getElementById('select-all-ready');
-  const selectionCount = document.getElementById('selection-count');
-  function updateSelection() {
-    if (selectAll) {
-      const checked = selectable.filter(input => input.checked).length;
-      selectAll.checked = selectable.length > 0 && checked === selectable.length;
-      selectAll.indeterminate = checked > 0 && checked < selectable.length;
-      selectAll.disabled = selectable.length === 0 || pageIsBusy();
-    }
-    if (selectionCount) {
-      const checked = selectionInputs.filter(input => input.checked).length;
-      selectionCount.textContent = `${checked} selected · ${selectable.length} ready for bulk selection`;
-    }
-  }
-  if (selectAll) {
-    selectAll.addEventListener('change', () => {
-      selectable.forEach(input => { input.checked = selectAll.checked; });
-      updateSelection();
-    });
-  }
-  selectionInputs.forEach(input => input.addEventListener('change', updateSelection));
-  form.addEventListener('reset', () => window.setTimeout(updateSelection, 0));
-  updateSelection();
-  if (bulkSelect) bulkSelect.hidden = false;
-  form.addEventListener('submit', event => {
-    event.preventDefault();
-    if (form.dataset.submitting === 'true' || pageIsBusy()) return;
-    const selected = form.querySelectorAll('input[name="selected"]:checked, input[name="managed_selected"]:checked, input[name="resource_selected"]:checked');
-    if (!selected.length) {
-      window.alert('Select at least one dashboard, managed file, or Lovelace resource ready to apply.');
-      return;
-    }
-    form.dataset.submitting = 'true';
-    const applyButton = document.getElementById('apply-button');
-    applyButton.disabled = true;
-    applyButton.textContent = 'Applying…';
-    ['refresh-button', 'refresh-source-button', 'cancel-button', 'select-all-ready'].forEach(id => {
-      const button = document.getElementById(id);
-      if (button) button.disabled = true;
-    });
-    document.getElementById('apply-progress').classList.add('visible');
-    window.setTimeout(() => form.submit(), 50);
-  });
-}
-const sourceSelect = document.querySelector('#source select[name="source"]');
-if (sourceSelect) {
-  sourceSelect.addEventListener('change', event => {
-    const sourceForm = event.target.form;
-    const sha = sourceForm.querySelector('input[name="source_sha"]');
-    if (sha) sha.value = '';
-    if (!markPageBusy('Refreshing source…')) return;
-    submitAfterPaint(sourceForm);
-  });
-}
-</script>
-</body></html>
-"""
 
 
 @app.before_request
@@ -799,7 +372,19 @@ def collect_changes(commit_sha="", revision=None, only_relative=None):
         current = ha_dashboard_config(relative)
         base = base_hash(bases.get(relative))
         live_entry = store.dashboards.get(relative)
-        if current is None:
+        invalid_source = (
+            "Git" if not valid_dashboard_structure(github)
+            else "Home Assistant" if current is not None and not valid_dashboard_structure(current)
+            else None
+        )
+        if invalid_source:
+            status, css, selectable = "ERROR", "error", False
+            reason = (
+                f"Nieprawidłowa struktura dashboardu w {invalid_source}. "
+                "Dashboard musi być obiektem JSON, a views listą obiektów."
+            )
+            should_adopt = False
+        elif current is None:
             if registered_paths is None:
                 registered_paths = ha_registered_url_paths()
             url_path = dashboard_url_path(relative)
@@ -918,6 +503,7 @@ def render_review(results=None, *, source=None, pin_sha=None):
     managed_changes = []
     resource_changes = []
     revision = source
+    project_targets = {}
     with REPO_LOCK:
         try:
             requested_ref, _kind = requested_source_from_request()
@@ -928,6 +514,13 @@ def render_review(results=None, *, source=None, pin_sha=None):
                 )
             else:
                 revision = coerce_revision(revision, requested_ref)
+            for project in PROJECTS.values():
+                try:
+                    project_targets[project.id] = release_set(
+                        load_json(WORKDIR / "deployments" / (project.id + ".json")), project
+                    )
+                except Exception:
+                    project_targets[project.id] = None
             changes = collect_changes(revision=revision)
             entries = managed_entries_for_revision()
             if entries and not MANAGED_POLICY_ERROR:
@@ -968,31 +561,32 @@ def render_review(results=None, *, source=None, pin_sha=None):
             if not isinstance(revision, SourceRevision):
                 revision = SourceRevision.fallback()
     has_ready = (
-        not (revision and revision.stale)
+        not error
+        and not (revision and revision.stale)
         and (
             any(change["selectable"] for change in changes)
             or any(change["selectable"] for change in managed_changes)
             or any(change["selectable"] for change in resource_changes)
         )
     )
+    groups = configuration_groups(changes, managed_changes, resource_changes)
+    projects = app.extensions["project_overview"](
+        {} if error or (revision and revision.stale) else project_targets,
+        canonical=bool(revision and is_canonical_source(
+            revision.source_ref, revision.source_kind,
+        )),
+    )
     return render_template_string(
         TEMPLATE,
-        changes=changes,
-        managed_changes=managed_changes,
-        resource_changes=resource_changes,
-        changed_dashboards=[item for item in changes if is_changed_review(item)],
-        unchanged_dashboards=[item for item in changes if not is_changed_review(item)],
-        changed_managed=[item for item in managed_changes if is_changed_review(item)],
-        unchanged_managed=[item for item in managed_changes if not is_changed_review(item)],
-        changed_resources=[item for item in resource_changes if is_changed_review(item)],
-        unchanged_resources=[item for item in resource_changes if not is_changed_review(item)],
-        unchanged_count=sum(
-            1 for item in (*changes, *managed_changes, *resource_changes)
-            if not is_changed_review(item)
-        ),
-        file_summary=summarize_changed_files(
-            changes, managed_changes, resource_changes
-        ),
+        ui_style=STYLE,
+        ui_script=SCRIPT,
+        configuration_groups=groups,
+        changed_groups=[g for g in groups if g["changed"]],
+        unchanged_count=sum(len(g["unchanged"]) for g in groups),
+        project_overview=projects,
+        overview=review_summary(groups, projects, incomplete=bool(
+            error or MANAGED_POLICY_ERROR or resource_error or (revision and revision.stale)
+        )),
         managed_policy_error=MANAGED_POLICY_ERROR,
         resource_error=resource_error,
         error=error,

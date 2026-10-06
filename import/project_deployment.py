@@ -222,7 +222,7 @@ class Backend:
         if len(self.token) < 32:
             raise ValueError("Brak dedykowanego klucza deploy")
 
-    def request(self, path, value=None, *, maximum=65536):
+    def request(self, path, value=None, *, maximum=65536, timeout=30):
         request = Request(
             self.url + path,
             data=None if value is None else json.dumps(value).encode(),
@@ -238,7 +238,7 @@ class Backend:
             def redirect_request(self, *args, **kwargs):
                 return None
 
-        with build_opener(NoRedirect).open(request, timeout=30) as response:
+        with build_opener(NoRedirect).open(request, timeout=timeout) as response:
             data = response.read(maximum + 1)
             if len(data) > maximum:
                 raise ValueError("Nieprawidłowa odpowiedź wykonawcy")

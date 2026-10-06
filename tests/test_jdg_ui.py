@@ -204,6 +204,110 @@ class UI(unittest.TestCase):
             item["preview_ha_hash"] = item["preview_desired_hash"]
         return [{"ok": True}]
 
+    def overview(self, releases=None, **kwargs):
+        return self.app.extensions["project_overview"](
+            {"jdg": releases or {"backend_version": "0.3.0", "integration_version": "0.7.0"}},
+            **kwargs,
+        )[0]
+
+    def test_availability_reads_live_versions_without_preparing_or_launching_job(self):
+        self.manager().installer.target.mkdir(parents=True)
+        project = self.overview()
+        self.assertEqual(project["state"], "update")
+        self.assertEqual(project["components"][0]["current"], "0.1.0")
+        self.assertEqual(project["components"][0]["target"], "0.3.0")
+        self.assertEqual(project["components"][1]["current"], "0.7.0")
+        self.assertEqual(self.backend.calls, [("/status", None)])
+        self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
+        self.assertIsNone(self.manager().read())
+        self.assertFalse((self.root / "data/jdg").exists())
+
+    def test_saved_success_does_not_hide_new_application_version(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        job["status"] = "success"
+        self.manager().save(job)
+        self.manager().installer.target.mkdir(parents=True)
+        self.backend.active["version"] = "0.3.0"
+        self.backend.calls.clear()
+        project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
+        self.assertEqual(project["state"], "update")
+        self.assertEqual(project["components"][0]["target"], "0.4.0")
+        self.assertEqual(project["components"][1]["target"], "0.8.0")
+        self.assertEqual(self.manager().read()["status"], "success")
+        self.assertEqual(self.backend.calls, [("/status", None)])
+
+    def test_unreachable_service_keeps_known_integration_and_redacts_error(self):
+        self.manager().installer.target.mkdir(parents=True)
+        self.backend.request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("sensitive synthetic URL"))
+        project = self.overview()
+        self.assertEqual(project["state"], "unknown")
+        self.assertIsNone(project["components"][0]["current"])
+        self.assertEqual(project["components"][1]["current"], "0.7.0")
+        self.assertNotIn("sensitive", str(project))
+        self.assertIsNone(self.manager().read())
+
+    def test_feature_source_does_not_offer_main_application_versions(self):
+        project = self.overview(canonical=False)
+        self.assertEqual(project["state"], "source")
+        self.assertTrue(all(c["target"] is None for c in project["components"]))
+        self.assertFalse(self.backend.calls)
+        self.assertFalse(self.actions)
+
+    def test_corrupt_saved_plan_does_not_break_the_overview_or_launch_work(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        del job["status"]
+        self.manager().save(job)
+        self.backend.calls.clear()
+        self.assertEqual(self.overview()["state"], "unknown")
+        self.assertEqual(self.backend.calls, [("/status", None)])
+        self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
+
+    def test_pending_plan_does_not_display_new_main_versions_as_approved(self):
+        self.client.post("/projects/jdg/review")
+        project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
+        self.assertEqual(project["state"], "review")
+        self.assertEqual(project["components"][0]["target"], "0.3.0")
+        self.assertEqual(project["components"][1]["target_label"], "przygotowane")
+
+    def test_new_versions_remain_visible_beside_each_active_pinned_job(self):
+        self.client.post("/projects/jdg/review")
+        original = self.manager().read()
+        for status in ("review", "running", "failed"):
+            with self.subTest(status=status):
+                original["status"] = status
+                self.manager().save(original)
+                self.backend.calls.clear()
+                self.actions.clear()
+                project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
+                self.assertEqual(project["state"], status)
+                self.assertTrue(project["has_new_versions"])
+                self.assertEqual([c["target"] for c in project["components"]], ["0.3.0", "0.7.0"])
+                self.assertEqual([c["available_target"] for c in project["components"]], ["0.4.0", "0.8.0"])
+                self.assertEqual(self.manager().read(), original)
+                self.assertEqual(self.backend.calls, [("/status", None)])
+                self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
+
+    def test_pending_job_does_not_invent_available_versions_when_targets_are_missing(self):
+        self.client.post("/projects/jdg/review")
+        project = self.app.extensions["project_overview"]({"jdg": None})[0]
+        self.assertEqual(project["state"], "review")
+        self.assertTrue(project["availability_unknown"])
+        self.assertFalse(project["has_new_versions"])
+        self.assertTrue(all(c["available_target"] is None for c in project["components"]))
+        self.assertEqual(project["components"][0]["target"], "0.3.0")
+
+    def test_pending_plan_keeps_its_recovery_link(self):
+        self.client.post("/projects/jdg/review")
+        self.assertEqual(self.overview()["state"], "review")
+        job = self.manager().read()
+        job["status"] = "failed"
+        self.manager().save(job)
+        project = self.overview()
+        self.assertEqual(project["state"], "failed")
+        self.assertEqual(project["action_label"], "Wznów import")
+
     def test_complete_review_approval_and_readback(self):
         response = self.client.post("/projects/jdg/review")
         self.assertEqual(response.status_code, 303)

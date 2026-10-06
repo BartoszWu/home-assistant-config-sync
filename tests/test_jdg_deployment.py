@@ -59,7 +59,7 @@ class FakeBackend:
     def integration(self, backend_release, integration_version):
         return archive(integration_version)
 
-    def request(self, path, value=None):
+    def request(self, path, value=None, *, timeout=30):
         self.calls.append((path, value))
         if path == "/status":
             return dict(self.active)
