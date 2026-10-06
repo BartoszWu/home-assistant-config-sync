@@ -2,9 +2,10 @@ import json
 import os
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PurePosixPath
 
-from flask import Flask, abort, render_template_string, request
+from flask import Flask, Response, abort, render_template_string, request, stream_with_context
 from websocket import create_connection
 from project_ui import register as register_projects
 from review_ui import TEMPLATE, STYLE, SCRIPT, configuration_groups, review_summary
@@ -496,116 +497,184 @@ def stale_source_message(revision: SourceRevision) -> str:
     )
 
 
+def project_targets_for_revision():
+    targets = {}
+    for project in PROJECTS.values():
+        try:
+            targets[project.id] = release_set(
+                load_json(WORKDIR / "deployments" / (project.id + ".json")), project
+            )
+        except Exception:
+            targets[project.id] = None
+    return targets
+
+
+def collect_review_context(revision):
+    """Caller owns REPO_LOCK until all readers of this pinned tree finish."""
+    error = resource_error = None
+    changes, managed_changes, resource_changes = [], [], []
+    try:
+        changes = collect_changes(revision=revision)
+        entries = managed_entries_for_revision()
+        if entries and not MANAGED_POLICY_ERROR:
+            managed_changes, _bases = collect_managed_changes(
+                WORKDIR,
+                HA_CONFIG_ROOT,
+                entries,
+                unsafe_reason,
+                stage_frontend=True,
+                commit_sha=revision.commit_sha,
+            )
+            managed_store = live_provenance_store()
+            for item in managed_changes:
+                live_entry = managed_store.managed_files.get(item["relative"])
+                item["provenance_label"] = provenance_label(live_entry)
+                item["live_source_ref"] = (
+                    None if live_entry is None else live_entry.source_ref
+                )
+                item["live_short_sha"] = (
+                    None if live_entry is None else live_entry.short_sha()
+                )
+            managed_changes = [public_managed_change(item) for item in managed_changes]
+        if MANAGED_POLICY is not None and not MANAGED_POLICY_ERROR:
+            try:
+                resource_changes = collect_resource_changes(
+                    MANAGED_POLICY, ha_ws_call, entries
+                )
+                resource_changes = [
+                    public_managed_change(item) for item in resource_changes
+                ]
+            except Exception as exception:
+                resource_error = str(exception)
+    except Exception as exception:
+        error = str(exception)
+    groups = configuration_groups(changes, managed_changes, resource_changes)
+    return {
+        "configuration_groups": groups,
+        "changed_groups": [g for g in groups if g["changed"]],
+        "unchanged_count": sum(len(g["unchanged"]) for g in groups),
+        "managed_policy_error": MANAGED_POLICY_ERROR,
+        "resource_error": resource_error, "error": error, "git_source": revision,
+        "has_ready": not error and not MANAGED_POLICY_ERROR and not resource_error and not revision.stale and any(
+            i["selectable"] for i in changes + managed_changes + resource_changes
+        ),
+        "has_missing_base": any(c["status"] == MISSING_BASE_STATUS for c in changes),
+        "has_managed_missing_base": any(c["status"] == MISSING_BASE_STATUS for c in managed_changes),
+    }
+
+
+def empty_review_context(revision, error=None):
+    return {
+        "configuration_groups": [], "changed_groups": [], "unchanged_count": 0,
+        "git_source": revision, "error": error, "managed_policy_error": MANAGED_POLICY_ERROR,
+        "resource_error": None, "has_ready": False,
+        "has_missing_base": False, "has_managed_missing_base": False,
+    }
+
+
+def render_review_context(context, projects, *, results=None, fragment=None, loading=False):
+    incomplete = bool(context["error"] or context["managed_policy_error"] or context["resource_error"] or context["git_source"].stale)
+    return render_template_string(
+        TEMPLATE, **context, ui_style=STYLE, ui_script=SCRIPT,
+        project_overview=projects,
+        overview=review_summary(context["configuration_groups"], projects, incomplete=incomplete),
+        results=results or [], fragment=fragment, loading=loading,
+    )
+
+
 def render_review(results=None, *, source=None, pin_sha=None):
-    error = None
-    resource_error = None
-    changes = []
-    managed_changes = []
-    resource_changes = []
-    revision = source
-    project_targets = {}
+    """Synchronous fallback and the result of explicit mutations."""
     with REPO_LOCK:
         try:
             requested_ref, _kind = requested_source_from_request()
-            if revision is None:
-                revision = coerce_revision(
-                    refresh_repo(requested_ref, pin_sha=pin_sha),
-                    requested_ref,
-                )
-            else:
-                revision = coerce_revision(revision, requested_ref)
-            for project in PROJECTS.values():
-                try:
-                    project_targets[project.id] = release_set(
-                        load_json(WORKDIR / "deployments" / (project.id + ".json")), project
-                    )
-                except Exception:
-                    project_targets[project.id] = None
-            changes = collect_changes(revision=revision)
-            entries = managed_entries_for_revision()
-            if entries and not MANAGED_POLICY_ERROR:
-                managed_changes, _bases = collect_managed_changes(
-                    WORKDIR,
-                    HA_CONFIG_ROOT,
-                    entries,
-                    unsafe_reason,
-                    stage_frontend=True,
-                    commit_sha=revision.commit_sha,
-                )
-                managed_store = live_provenance_store()
-                for item in managed_changes:
-                    live_entry = managed_store.managed_files.get(item["relative"])
-                    item["provenance_label"] = provenance_label(live_entry)
-                    item["live_source_ref"] = (
-                        None if live_entry is None else live_entry.source_ref
-                    )
-                    item["live_short_sha"] = (
-                        None if live_entry is None else live_entry.short_sha()
-                    )
-                managed_changes = [public_managed_change(item) for item in managed_changes]
-            if MANAGED_POLICY is not None and not MANAGED_POLICY_ERROR:
-                try:
-                    resource_changes = collect_resource_changes(
-                        MANAGED_POLICY, ha_ws_call, entries
-                    )
-                    resource_changes = [
-                        public_managed_change(item) for item in resource_changes
-                    ]
-                except Exception as exception:
-                    resource_error = str(exception)
-        except InvalidSourceRef as exception:
-            error = str(exception)
-            revision = revision if isinstance(revision, SourceRevision) else SourceRevision.fallback()
+            revision = coerce_revision(source or refresh_repo(requested_ref, pin_sha=pin_sha), requested_ref)
+            targets = project_targets_for_revision()
+            context = collect_review_context(revision)
         except Exception as exception:
-            error = str(exception)
-            if not isinstance(revision, SourceRevision):
-                revision = SourceRevision.fallback()
-    has_ready = (
-        not error
-        and not (revision and revision.stale)
-        and (
-            any(change["selectable"] for change in changes)
-            or any(change["selectable"] for change in managed_changes)
-            or any(change["selectable"] for change in resource_changes)
-        )
-    )
-    groups = configuration_groups(changes, managed_changes, resource_changes)
+            revision = source if isinstance(source, SourceRevision) else SourceRevision.fallback()
+            targets = {}
+            context = empty_review_context(revision, str(exception))
     projects = app.extensions["project_overview"](
-        {} if error or (revision and revision.stale) else project_targets,
-        canonical=bool(revision and is_canonical_source(
-            revision.source_ref, revision.source_kind,
-        )),
+        {} if context["error"] or revision.stale else targets,
+        canonical=is_canonical_source(revision.source_ref, revision.source_kind),
     )
-    return render_template_string(
-        TEMPLATE,
-        ui_style=STYLE,
-        ui_script=SCRIPT,
-        configuration_groups=groups,
-        changed_groups=[g for g in groups if g["changed"]],
-        unchanged_count=sum(len(g["unchanged"]) for g in groups),
-        project_overview=projects,
-        overview=review_summary(groups, projects, incomplete=bool(
-            error or MANAGED_POLICY_ERROR or resource_error or (revision and revision.stale)
-        )),
-        managed_policy_error=MANAGED_POLICY_ERROR,
-        resource_error=resource_error,
-        error=error,
-        commit=revision.short_sha if revision else "-",
-        git_source=revision,
-        has_ready=has_ready,
-        has_missing_base=any(
-            change["status"] == MISSING_BASE_STATUS for change in changes
-        ),
-        has_managed_missing_base=any(
-            change["status"] == MISSING_BASE_STATUS for change in managed_changes
-        ),
-        results=results or [],
-    )
+    return render_review_context(context, projects, results=results)
+
+
+def review_event(kind, **data):
+    return "data: " + json.dumps({"kind": kind, **data}, ensure_ascii=False) + "\n\n"
+
+
+@app.route("/review-stream")
+def review_stream():
+    try:
+        requested_ref, _kind = requested_source_from_request()
+    except InvalidSourceRef:
+        abort(400)
+
+    @stream_with_context
+    def events():
+        yield review_event("progress", message="Sprawdzanie wersji w Git…")
+        # The lock protects the one checkout until both sections have read it.
+        # Workers collect each section; HTML generation stays in the request thread.
+        with REPO_LOCK:
+            try:
+                revision = coerce_revision(refresh_repo(requested_ref), requested_ref)
+                targets = project_targets_for_revision()
+            except Exception:
+                fallback = empty_review_context(SourceRevision.fallback(requested_ref))
+                yield review_event("source", html=render_review_context(fallback, [], fragment="source"))
+                yield review_event("error", message="Nie udało się sprawdzić wersji w Git. Spróbuj ponownie.")
+                return
+            context = empty_review_context(revision)
+            projects = []
+            yield review_event("source", html=render_review_context(context, [], fragment="source"))
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                tasks = {
+                    executor.submit(collect_review_context, revision): "configuration",
+                    executor.submit(
+                        app.extensions["project_overview"], {} if revision.stale else targets,
+                        canonical=is_canonical_source(revision.source_ref, revision.source_kind),
+                    ): "applications",
+                }
+                for future in as_completed(tasks):
+                    kind = tasks[future]
+                    try:
+                        value = future.result()
+                    except Exception:
+                        if kind == "configuration":
+                            value = empty_review_context(revision, "Nie udało się sprawdzić konfiguracji.")
+                        else:
+                            # Keep known sections, but never claim a full current state.
+                            value = [{
+                                "id": p.id, "title": p.title, "state": "unknown",
+                                "status_label": "Nie udało się sprawdzić", "action_label": "Otwórz",
+                                "description": "Sprawdź połączenie", "components": [],
+                            } for p in PROJECTS.values()]
+                    if kind == "configuration":
+                        context = value
+                        count = len(context["changed_groups"])
+                    else:
+                        projects = value
+                        count = len(projects)
+                    yield review_event(kind, html=render_review_context(context, projects, fragment=kind), count=count)
+            yield review_event("complete", html=render_review_context(context, projects, fragment="overview"))
+
+    return Response(events(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-store", "X-Accel-Buffering": "no",
+    })
 
 
 @app.route("/")
 def index():
-    return render_review()
+    if request.args.get("view") == "full":
+        return render_review()
+    try:
+        requested_ref, _kind = requested_source_from_request()
+    except InvalidSourceRef as exception:
+        return render_review_context(empty_review_context(SourceRevision.fallback(), str(exception)), [])
+    revision = SourceRevision.fallback(requested_ref)
+    return render_review_context(empty_review_context(revision), [], loading=True)
 
 
 @app.route("/apply", methods=["POST"])

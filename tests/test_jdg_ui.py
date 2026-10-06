@@ -298,6 +298,30 @@ class UI(unittest.TestCase):
         self.assertTrue(all(c["available_target"] is None for c in project["components"]))
         self.assertEqual(project["components"][0]["target"], "0.3.0")
 
+    def test_cancel_confirms_success_and_does_not_launch_deployment(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        self.backend.calls.clear()
+        self.actions.clear()
+        response = self.client.post("/projects/jdg/cancel", data={"id": job["id"]})
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.manager().read()["status"], "cancelled")
+        self.assertEqual(self.manager().read()["review_hash"], job["review_hash"])
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Przygotowana aktualizacja została anulowana.", html)
+        self.assertIn("Sprawdź aktualizację", html)
+        self.assertNotIn("Importuj JDG", html)
+        self.assertFalse(self.backend.calls)
+        self.assertFalse(self.actions)
+
+    def test_stale_cancel_does_not_cancel_the_current_review(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        response = self.client.post("/projects/jdg/cancel", data={"id": "obsolete-review"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(self.manager().read(), job)
+        self.assertIn("Operacja wstrzymana", response.get_data(as_text=True))
+
     def test_pending_plan_keeps_its_recovery_link(self):
         self.client.post("/projects/jdg/review")
         self.assertEqual(self.overview()["state"], "review")

@@ -138,7 +138,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         (self.repo / 'state/dashboard-bases.json').write_text(json.dumps(bases))
 
         html = app.app.test_client().get(
-            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
         ).get_data(as_text=True)
         safe_input = re.search(r'<input[^>]+name="selected"[^>]+value="test.json"[^>]*>', html)
         warned_input = re.search(r'<input[^>]+name="selected"[^>]+value="warned-dashboard.json"[^>]*>', html)
@@ -167,7 +167,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         }))
         provider = Mock(return_value=[])
         with patch.dict(app.app.extensions, {'project_overview': provider}):
-            app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
+            app.app.test_client().get('/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
         targets = provider.call_args.args[0]
         self.assertEqual(targets['jdg']['backend_version'], '0.4.0')
         self.assertTrue(provider.call_args.kwargs['canonical'])
@@ -182,7 +182,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
                 self.assertEqual(changes['invalid.json']['status'], 'ERROR')
                 self.assertFalse(changes['invalid.json']['selectable'])
                 self.assertTrue(changes['test.json']['selectable'])
-                response = app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
+                response = app.app.test_client().get('/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'})
                 self.assertEqual(response.status_code, 200)
                 html = response.get_data(as_text=True)
                 self.assertIn('Nieprawidłowa struktura dashboardu w Git', html)
@@ -198,7 +198,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             self.assertEqual(changes['test.json']['status'], 'ERROR')
             self.assertIn('Home Assistant', changes['test.json']['reason'])
             self.assertTrue(changes['healthy.json']['selectable'])
-            self.assertEqual(app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).status_code, 200)
+            self.assertEqual(app.app.test_client().get('/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).status_code, 200)
 
     def test_forged_selection_of_invalid_dashboard_is_rejected_by_fresh_apply_check(self):
         app = self.app_module
@@ -223,7 +223,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             ],
         }
         with patch.dict(app.app.extensions, {'project_overview': lambda *args, **kwargs: [project]}):
-            html = app.app.test_client().get('/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).get_data(as_text=True)
+            html = app.app.test_client().get('/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}).get_data(as_text=True)
         self.assertIn('Dostępny nowy zestaw wersji', html)
         self.assertIn('przygotowane </span>0.3.0', html)
         self.assertIn('obecne i przygotowane </span>0.7.0', html)
@@ -235,7 +235,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
         app = self.app_module
         with patch.object(app, 'managed_entries_for_revision', side_effect=ValueError('synthetic read failed')):
             html = app.app.test_client().get(
-                '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+                '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
             ).get_data(as_text=True)
         self.assertIn('Nie wszystko udało się sprawdzić', html)
         self.assertIsNone(re.search(r'<input[^>]+name="selected"', html))
@@ -389,7 +389,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             shared_path=app.SHARED_STATE_PATH,
         )
         html = app.app.test_client().get(
-            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
         ).get_data(as_text=True)
         entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
         self.assertTrue(entry.canonical)
@@ -415,7 +415,7 @@ class ApplyPreviewRegressionTests(unittest.TestCase):
             shared_path=app.SHARED_STATE_PATH,
         )
         html = app.app.test_client().get(
-            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
         ).get_data(as_text=True)
         entry = load_json_store(app.IMPORT_STATE_PATH).dashboards['test.json']
         self.assertFalse(entry.canonical)
@@ -625,7 +625,7 @@ class CreateMissingDashboardApplyTests(unittest.TestCase):
     def test_review_does_not_fail_closed_for_unknown_lovelace_config(self):
         app = self.app_module
         html = app.app.test_client().get(
-            '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+            '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
         ).get_data(as_text=True)
         self.assertNotIn('Unknown config specified', html)
         self.assertIn('READY TO APPLY — CREATE DASHBOARD', html)
@@ -811,7 +811,7 @@ class LovelaceResourceApplyTests(unittest.TestCase):
         with patch.object(app, 'ha_ws_call', side_effect=ws), \
              patch.object(app, 'managed_entries_for_revision', return_value=[self.entry]):
             html = app.app.test_client().get(
-                '/', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
+                '/?view=full', environ_overrides={'REMOTE_ADDR': '172.30.32.2'}
             ).get_data(as_text=True)
         self.assertNotIn('lovelace/resources/create', calls)
         self.assertNotIn('lovelace/resources/delete', calls)
