@@ -265,9 +265,7 @@ def register(
                     coordinator,
                 )
                 managers[project_id] = manager
-                job = manager.read()
-                if job and job["status"] == "running":
-                    manager.launch()
+                manager.recover_approved()
             return managers[project_id]
 
     def show(project, error=None):
@@ -438,8 +436,7 @@ def register(
         try:
             deployment = get_manager(project_id)
             if action == "review":
-                sha, releases, plan = dashboards.preview(project)
-                deployment.review(releases, sha, plan)
+                deployment.prepare()
             elif action == "start":
                 deployment.approve(
                     request.form.get("id"), request.form.get("review_hash")
@@ -463,13 +460,7 @@ def register(
         if (config_directory / (project.id + ".json")).is_file():
             try:
                 manager = get_manager(project.id)
-                job = manager.read()
-                if (
-                    job
-                    and job["status"] == "success"
-                    and coordinator.owner() == {"project": project.id, "id": job["id"]}
-                ):
-                    coordinator.release(project.id, job["id"])
+                manager.recover_approved()
             except Exception:  # noqa: BLE001, S110 - unavailable setup is reported by the UI.
                 pass
     return get_manager

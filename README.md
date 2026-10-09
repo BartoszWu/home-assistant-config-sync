@@ -381,8 +381,25 @@ Git nie może ich wyłączyć. JDG i Dziennik używają `targeted`:
   backup stanu; Dziennik zachowuje sprawdzany backup SQLite. Import nie kopiuje
   baz gości przez mount HA. Jeżeli wersja i SHA backendu już odpowiadają planowi,
   nie zleca wdrożenia backendu ani ponownej kopii jego danych.
+- Nowe plany aktualizujące backend z trwałymi danymi sprawdzają uwierzytelnione
+  `GET /capabilities`: `recovery_receipt=1` i minimalną wersję wydania. Po
+  aktualizacji `GET /jobs/<id>` musi potwierdzić ten sam `id`, `version`, `sha`
+  i zwrócić `recovery` z dokładnie polami `schema_version=1`, `job_id`, `version`,
+  `sha`, `kind` (`sqlite` lub `state_archive`), `verified=true`, `sha256` kopii.
+  Wykonawca sprawdza kopię przed zmianą kodu i ponownie przy odzyskiwaniu zadania.
+  Import zachowuje potwierdzenie w planie przed instalacją integracji. Brak lub
+  niezgodność zatrzymuje aktualizację; odpowiedź nie zawiera ścieżek/danych bazy.
+  Starsze zatwierdzone plany bez `executor_contract` zachowują swój kontrakt.
+  Dokończ je przed aktualizacją wykonawców.
+
 - HA i jego historia nie są kopiowane przy zwykłej aktualizacji tych profili.
   Zmiany kart/dashboardów mają własny rollback i odczyt po zapisie.
+
+Wykonawcy są instalowani osobno od wydania backendu. Przed użyciem nowych planów
+zaktualizuj ich kod z zatwierdzonych checkoutów i uruchom je zgodnie z instrukcjami
+produktu. JDG wymaga także wydania backendu co najmniej 0.4.0 z updaterem zapisującym
+potwierdzenie. Wykonawca Dziennika może zabezpieczać wydania od 0.2.0. Sam merge
+ani aktualizacja App Import nie instaluje wykonawców.
 
 Profil ingerujący w trwałe ustawienia HA wymaga `ha_configuration`: kopii HA
 bez bazy historii, bez Apps. `full_ha` pozostawia bazę historii dla operacji,
@@ -410,9 +427,10 @@ używamy uninstall ani nie usuwamy całego HACS.
    Określ `RecoveryPolicy`: domyślny `targeted` tylko dla odwracalnych zmian,
    `backend_data="executor"` gdy aplikacja posiada trwałe dane. Zweryfikuj
    rzeczywistą kopię tych danych w adapterze wykonawcy; sama deklaracja jej nie tworzy.
-2. Wykonawca realizuje ten sam kontrakt `GET /status`, `/release`, `/integration`,
+2. Wykonawca realizuje ten sam kontrakt `GET /capabilities`, `/status`, `/release`, `/integration`,
    `POST /jobs` i `GET /jobs/<id>`, przyjmując wyłącznie przypięte wydania/SHA.
-   Różnice języka, jednostek systemd i bazy pozostają w jego adapterze.
+   Dla trwałych danych zwraca opisane wyżej potwierdzenie kopii. Różnice języka,
+   jednostek systemd i bazy pozostają w jego adapterze.
 3. Dodaj manifest `deployments/<id>.json` do repo konfiguracji HA oraz lokalne
    `<id>.json` i dedykowany klucz połączenia w `/review`. Bootstrap wykonawcy
    wymaga osobnego zlecenia; nie kopiuj poświadczeń do Git.
@@ -420,6 +438,14 @@ używamy uninstall ani nie usuwamy całego HACS.
    przeglądu, zatwierdzenia, checkpointu, aktualizacji i wznowienia. Nowa aplikacja
    korzysta z `Deployments`, `RecoveryCheckpoint`, `DashboardSync` i tego samego UI;
    nie twórz osobnej kolejności wdrożenia ani osobnego ekranu aktualizacji.
+
+Wspólny moduł `Deployments` udostępnia `prepare()`, `approve(id, review_hash)`,
+`read()`, `resume(id)` i `cancel(id)`. `prepare()` sam dobiera dashboardy przez
+`DashboardSync`; ekran nie buduje planu ani nie steruje kolejnością etapów.
+`recover_approved()` obsługuje start procesu bez uruchamiania niezleconego zadania.
+`Executor` ukrywa transport, oczekiwanie i walidację potwierdzeń. `RecoveryCheckpoint`
+przyjmuje wewnętrzny `RecoveryPlan`, zwraca checksum i nie modyfikuje ani nie zapisuje
+jobów; trwały format i przejścia należą do `Deployments`.
 
 Stan każdego projektu jest oddzielny w `/data/projects/<id>`, a trwały
 `owner.json` rezerwuje HA dla jednego zatwierdzonego zadania. Pozostałe projekty

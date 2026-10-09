@@ -79,11 +79,11 @@ class Projects(unittest.TestCase):
             self.coordinator,
             sleep=lambda _: None,
         )
-        manager.launch = lambda: None
+        manager._launch = lambda: None
         return manager
 
     def review(self, manager):
-        return manager.review(
+        return manager._review(
             {
                 "schema_version": 2,
                 "project": manager.project.id,
@@ -103,10 +103,10 @@ class Projects(unittest.TestCase):
         with self.assertRaises(ValueError):
             with self.coordinator.operation():
                 self.fail("Ordinary Apply must not run during a project update")
-        first.run()
+        first._run()
         self.assertIsNone(self.coordinator.owner())
         second.approve(jobs[1]["id"], jobs[1]["review_hash"])
-        second.run()
+        second._run()
         self.assertEqual(
             [first.read()["status"], second.read()["status"]], ["success", "success"]
         )
@@ -125,7 +125,7 @@ class Projects(unittest.TestCase):
         job = self.review(manager)
         manager.approve(job["id"], job["review_hash"])
         self.dashboard.fail = True
-        manager.run()
+        manager._run()
         self.assertEqual(manager.read()["status"], "failed")
         # New coordinator reads the durable owner, rather than an in-memory flag.
         self.coordinator = Coordinator(self.root / "state")
@@ -136,7 +136,7 @@ class Projects(unittest.TestCase):
         recovered = self.manager(OTHER)
         self.dashboard.fail = False
         recovered.resume(job["id"])
-        recovered.run()
+        recovered._run()
         self.assertEqual(recovered.read()["status"], "success")
         self.assertEqual(self.events.count(("demo", "restart")), 1)
         self.assertEqual(

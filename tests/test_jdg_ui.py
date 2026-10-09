@@ -235,7 +235,7 @@ class UI(unittest.TestCase):
         self.client.post("/projects/jdg/review")
         job = self.manager().read()
         job["status"] = "success"
-        self.manager().save(job)
+        self.manager()._save(job)
         self.manager().installer.target.mkdir(parents=True)
         self.backend.active["version"] = "0.3.0"
         self.backend.calls.clear()
@@ -267,7 +267,7 @@ class UI(unittest.TestCase):
         self.client.post("/projects/jdg/review")
         job = self.manager().read()
         del job["status"]
-        self.manager().save(job)
+        self.manager()._save(job)
         self.backend.calls.clear()
         self.assertEqual(self.overview()["state"], "unknown")
         self.assertEqual(self.backend.calls, [("/status", None)])
@@ -286,7 +286,7 @@ class UI(unittest.TestCase):
         for status in ("review", "running", "failed"):
             with self.subTest(status=status):
                 original["status"] = status
-                self.manager().save(original)
+                self.manager()._save(original)
                 self.backend.calls.clear()
                 self.actions.clear()
                 project = self.overview({"backend_version": "0.4.0", "integration_version": "0.8.0"})
@@ -336,7 +336,7 @@ class UI(unittest.TestCase):
         self.assertEqual(self.overview()["state"], "review")
         job = self.manager().read()
         job["status"] = "failed"
-        self.manager().save(job)
+        self.manager()._save(job)
         project = self.overview()
         self.assertEqual(project["state"], "failed")
         self.assertEqual(project["action_label"], "Wznów import")
@@ -373,8 +373,8 @@ class UI(unittest.TestCase):
         job = self.manager().read()
         job["status"] = "running"
         job["stage"] = "integration"
-        self.manager().save(job)
-        self.manager().launch = lambda: None
+        self.manager()._save(job)
+        self.manager()._launch = lambda: None
         html = self.client.get("/projects/jdg/").get_data(as_text=True)
         self.assertIn('aria-current="step"', html)
         self.assertIn("Postęp aktualizacji", html)
@@ -394,9 +394,9 @@ class UI(unittest.TestCase):
         self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
         job = self.manager().read()
         self.access.snapshot = lambda *args: (_ for _ in ()).throw(ValueError("capture failed"))
-        self.manager().launch = lambda: None
+        self.manager()._launch = lambda: None
         self.manager().approve(job["id"], job["review_hash"])
-        self.manager().run()
+        self.manager()._run()
         self.assertEqual(self.manager().read()["status"], "failed")
         self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
 
@@ -404,9 +404,9 @@ class UI(unittest.TestCase):
         self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
         job = self.manager().read()
         self.access.provenance_available = False
-        self.manager().launch = lambda: None
+        self.manager()._launch = lambda: None
         self.manager().approve(job["id"], job["review_hash"])
-        self.manager().run()
+        self.manager()._run()
         self.assertEqual(self.manager().read()["status"], "failed")
         self.assertFalse(any(kind == "export" for kind, _ in self.actions))
 

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from dashboard_logic import digest as content_digest
@@ -45,53 +46,61 @@ def snapshot_hash(snapshot):
     raise ValueError("Unknown recovery snapshot format")
 
 
+@dataclass(frozen=True)
+class RecoveryPlan:
+    job_id: str
+    profile_hash: str
+    source_sha: str
+    integration_hash: str
+    artifacts: dict
+    checksum: str | None
+    allow_capture: bool
+
+
 class RecoveryCheckpoint:
     def __init__(self, directory, installer, dashboard):
         self.directory = Path(directory) / "recovery"
         self.installer = installer
         self.dashboard = dashboard
 
-    def prepare(self, job, save):
-        if not re.fullmatch(r"[a-f0-9]{32}", job["id"]):
+    def prepare(self, plan):
+        if not re.fullmatch(r"[a-f0-9]{32}", plan.job_id):
             raise ValueError("Invalid recovery identity")
-        path = self.directory / (job["id"] + ".json")
+        path = self.directory / (plan.job_id + ".json")
         if path.is_symlink() or self.directory.is_symlink():
             raise ValueError("Invalid recovery path")
-        if job["stage"] != "backup" and (
-            not path.exists() or not job.get("recovery_checkpoint")
-        ):
+        if not plan.allow_capture and (not path.exists() or not plan.checksum):
             raise ValueError("Missing recovery checkpoint for an approved stage")
         if path.exists():
             checkpoint = json.loads(path.read_text())
         else:
-            if job.get("recovery_checkpoint"):
+            if plan.checksum:
                 raise ValueError("Missing recovery checkpoint")
             checkpoint = {
                 "schema_version": 1,
-                "job_id": job["id"],
-                "profile_hash": job["profile_hash"],
-                "source_sha": job["source_sha"],
+                "job_id": plan.job_id,
+                "profile_hash": plan.profile_hash,
+                "source_sha": plan.source_sha,
                 "integration": self.installer.recovery_snapshot(),
-                "dashboard": self.dashboard.snapshot(job),
+                "dashboard": self.dashboard.snapshot(plan.artifacts),
             }
-        self.verify(checkpoint, job)
+        self._verify(checkpoint, plan)
         checksum = digest(checkpoint)
-        if job.get("recovery_checkpoint") not in (None, checksum):
+        if plan.checksum not in (None, checksum):
             raise ValueError("Recovery checkpoint changed")
         if not path.exists():
             atomic_json(path, checkpoint)
-        job["recovery_checkpoint"] = checksum
-        save(job)
+        return checksum
 
     @staticmethod
-    def verify(checkpoint, job):
+    def _verify(checkpoint, plan):
         if any(
             checkpoint.get(k) != value
             for k, value in (
                 ("schema_version", 1),
-                ("job_id", job["id"]),
-                ("profile_hash", job["profile_hash"]),
-                ("source_sha", job["source_sha"]),
+                ("job_id", plan.job_id),
+                ("profile_hash", plan.profile_hash),
+                ("source_sha", plan.source_sha),
             )
         ):
             raise ValueError("Recovery checkpoint belongs to another plan")
@@ -102,11 +111,11 @@ class RecoveryCheckpoint:
                 for name, data in integration.items()
             }
         )
-        if actual != job["integration_before"]:
+        if actual != plan.integration_hash:
             raise ValueError("Integration changed before recovery capture")
         expected = {
             key: item
-            for key, item in job["dashboard"].get("expected", {}).items()
+            for key, item in plan.artifacts.items()
             if item["before"] != item["after"]
         }
         if set(checkpoint["dashboard"]) != set(expected):

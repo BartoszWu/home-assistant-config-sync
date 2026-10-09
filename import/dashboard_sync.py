@@ -58,10 +58,10 @@ class DashboardSync:
                 ):
                     raise ValueError("Dashboard provenance verification failed")
 
-    def snapshot(self, job):
+    def snapshot(self, artifacts):
         return {
             key: self.access.snapshot(item["kind"], item["relative"])
-            for key, item in job["dashboard"].get("expected", {}).items()
+            for key, item in artifacts.items()
             if item["before"] != item["after"]
         }
 
