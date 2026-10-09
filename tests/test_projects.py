@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from test_jdg_deployment import archive, FakeBackend
 from project_deployment import Backend, Coordinator, Deployments, Installer, unpack
-from project_profiles import JDG, Project
+from project_profiles import JDG, Project, RecoveryPolicy
 
 OTHER = Project(
     id="demo",
@@ -22,6 +22,7 @@ OTHER = Project(
     resources=("/local/dashboard/demo.mjs",),
     minimum_backend=(1, 0, 0),
     minimum_integration=(1, 0, 0),
+    recovery=RecoveryPolicy(),
 )
 
 
@@ -39,6 +40,9 @@ class Dashboard:
     def __init__(self):
         self.fail = False
         self.applied = []
+
+    def snapshot(self, job):
+        return {}
 
     def apply(self, job, save):
         if self.fail:

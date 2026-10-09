@@ -27,6 +27,7 @@ COPY review.js /review.js
 COPY project_ui.py /project_ui.py
 COPY project.js /project.js
 COPY project_deployment.py /project_deployment.py
+COPY project_recovery.py /project_recovery.py
 COPY project_profiles.py /project_profiles.py
 COPY dashboard_sync.py /dashboard_sync.py
 COPY dashboard_logic.py /dashboard_logic.py

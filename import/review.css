@@ -780,3 +780,12 @@ code {
     animation: none;
   }
 }
+
+.application-steps { list-style: none; padding: 0; margin: 16px 0 0; }
+.application-steps li { display: flex; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.application-steps li:last-child { border-bottom: 0; }
+.application-steps small { white-space: nowrap; }
+.application-steps .step-current { font-weight: 700; color: var(--blue); }
+.application-steps .step-pending { color: var(--muted); }
+.application-steps .step-done small { color: var(--green); }
+@media (max-width: 480px) { .application-steps li { gap: 8px; } }
