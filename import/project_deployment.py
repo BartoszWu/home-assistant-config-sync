@@ -16,7 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import Request
 
-from project_recovery import RecoveryCheckpoint, atomic_json, digest
+from project_executor import Executor
+from project_recovery import RecoveryCheckpoint, RecoveryPlan, atomic_json, digest
 
 VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
 SHA = re.compile(r"[a-f0-9]{40}\Z")
@@ -327,8 +328,9 @@ class Deployments:
         self.dashboard = dashboard
         self.sleep = sleep
         self.lock = threading.RLock()
-        self.running = False
+        self._running = False
         self.recovery = RecoveryCheckpoint(self.directory, installer, dashboard)
+        self.executor = Executor(backend, sleep)
 
     def read(self):
         path = self.directory / "job.json"
@@ -338,6 +340,19 @@ class Deployments:
             or (
                 "recovery_policy" in job
                 and job["recovery_policy"] != self.project.recovery.identity()
+            )
+            or (
+                "executor_contract" in job
+                and (
+                    type(job["executor_contract"]) is not int
+                    or job["executor_contract"]
+                    != (
+                        1
+                        if job.get("backend_changed")
+                        and self.project.recovery.backend_data == "executor"
+                        else 0
+                    )
+                )
             )
             or (
                 job.get("profile_hash") != digest(self.project.identity())
@@ -353,13 +368,42 @@ class Deployments:
             )
         return job
 
-    def save(self, job):
+    def _save(self, job):
         atomic_json(self.directory / "job.json", job)
 
-    def review(self, releases, source_sha, dashboard_plan):
+    def prepare(self):
+        source_sha, releases, dashboard_plan = self.dashboard.preview(self.project)
+        return self._review(releases, source_sha, dashboard_plan)
+
+    def recover_approved(self):
+        job = self.read()
+        if job and job["status"] == "running":
+            self._launch()
+        elif (
+            job
+            and job["status"] == "success"
+            and self.coordinator.owner()
+            == {"project": self.project.id, "id": job["id"]}
+        ):
+            self.coordinator.release(self.project.id, job["id"])
+
+    def _checkpoint(self, job):
+        plan = RecoveryPlan(
+            job["id"],
+            job["profile_hash"],
+            job["source_sha"],
+            job["integration_before"],
+            job["dashboard"].get("expected", {}),
+            job.get("recovery_checkpoint"),
+            job["stage"] == "backup",
+        )
+        job["recovery_checkpoint"] = self.recovery.prepare(plan)
+        self._save(job)
+
+    def _review(self, releases, source_sha, dashboard_plan):
         with self.lock:
             old = self.read()
-            if self.running or (
+            if self._running or (
                 old and old["status"] in ("running", "review", "failed")
             ):
                 raise ValueError(
@@ -378,6 +422,13 @@ class Deployments:
             active = self.backend.request("/status")
             if not active.get("healthy") or not SHA.fullmatch(active.get("sha", "")):
                 raise ValueError("Backend nie jest gotowy do aktualizacji")
+            backend_changed = any(
+                active.get(k) != backend[k] for k in ("sha", "version")
+            )
+            executor_contract = self.executor.review(
+                backend,
+                backend_changed and self.project.recovery.backend_data == "executor",
+            )
             data, checksum = self.backend.integration(
                 backend, releases["integration_version"]
             )
@@ -393,9 +444,8 @@ class Deployments:
                 "dashboard": dashboard_plan,
                 "backend": backend,
                 "backend_before": active,
-                "backend_changed": any(
-                    active.get(k) != backend[k] for k in ("sha", "version")
-                ),
+                "backend_changed": backend_changed,
+                "executor_contract": executor_contract,
                 "integration_before": self.installer.snapshot(),
                 "archive_hash": checksum,
                 "restart": False,
@@ -429,7 +479,7 @@ class Deployments:
             )
             self.ha("check", job)
             job["review_hash"] = digest(job)
-            self.save(job)
+            self._save(job)
             return job
 
     def approve(self, job_id, review_hash):
@@ -445,25 +495,25 @@ class Deployments:
                     raise ValueError("Stan zmienił się po review")
                 self.coordinator.claim(self.project.id, job["id"])
                 job["status"] = "running"
-                self.save(job)
+                self._save(job)
             elif job["status"] != "running":
                 return job
             self.coordinator.claim(self.project.id, job["id"])
-            self.launch()
+            self._launch()
             return job
 
-    def launch(self):
+    def _launch(self):
         with self.lock:
-            if self.running:
+            if self._running:
                 return
-            self.running = True
-            threading.Thread(target=self.run, daemon=True).start()
+            self._running = True
+            threading.Thread(target=self._run, daemon=True).start()
 
-    def advance(self, job, stage):
+    def _advance(self, job, stage):
         job["stage"] = stage
-        self.save(job)
+        self._save(job)
 
-    def run(self):
+    def _run(self):
         job = None
         try:
             job = self.read()
@@ -471,31 +521,30 @@ class Deployments:
                 return
             self.coordinator.claim(self.project.id, job["id"])
             if "recovery_policy" in job and job["stage"] != "backup":
-                self.recovery.prepare(job, self.save)
+                self._checkpoint(job)
+                if job.get("executor_contract") == 1 and job["stage"] != "backend":
+                    self.executor.validate(
+                        job["id"], job["backend"], job.get("backend_recovery")
+                    )
             if job["stage"] == "backup":
                 self.ha("check", job)
                 if "recovery_policy" in job:
-                    self.recovery.prepare(job, self.save)
+                    self._checkpoint(job)
                     if job["recovery_policy"]["ha_backup"] != "targeted":
                         self.ha("backup", job)
                 else:
                     # An approved legacy plan keeps its original HA backup.
                     self.ha("backup", job)
-                self.advance(job, "backend")
+                self._advance(job, "backend")
             if job["stage"] == "backend":
                 if job.get("backend_changed", True):
-                    value = {"id": job["id"], **job["backend"]}
-                    self.backend.request("/jobs", value)
-                    for _ in range(360):
-                        result = self.backend.request("/jobs/" + job["id"])
-                        if result["status"] == "success":
-                            break
-                        if result["status"] != "running":
-                            raise ValueError("Aktualizacja backendu nie powiodła się")
-                        self.sleep(5)
-                    else:
-                        raise TimeoutError("Aktualizacja backendu nie zakończyła się")
-                self.advance(job, "integration")
+                    receipt = self.executor.deploy(
+                        job["id"], job["backend"], job.get("executor_contract", 0)
+                    )
+                    if receipt is not None:
+                        job["backend_recovery"] = receipt
+                        self._save(job)
+                self._advance(job, "integration")
             if job["stage"] == "integration":
                 data = (self.directory / "integration.zip").read_bytes()
                 files = unpack(
@@ -506,10 +555,10 @@ class Deployments:
                 )
                 self.ha("takeover", job)
                 self.installer.install(files, job["integration_before"])
-                self.advance(job, "restart")
+                self._advance(job, "restart")
             if job["stage"] == "restart":
                 # Persist before request; do not issue a second restart after recovery.
-                self.advance(job, "wait_ha")
+                self._advance(job, "wait_ha")
                 if job["restart"]:
                     try:
                         self.ha("restart", job)
@@ -524,11 +573,11 @@ class Deployments:
                         self.sleep(5)
                 else:
                     raise TimeoutError("HA nie załadował oczekiwanej integracji")
-                self.advance(job, "dashboard")
+                self._advance(job, "dashboard")
             if job["stage"] == "dashboard":
                 with self.coordinator.operation(self.project.id, job["id"]):
-                    self.dashboard.apply(job, self.save)
-                self.advance(job, "verify")
+                    self.dashboard.apply(job, self._save)
+                self._advance(job, "verify")
             if job["stage"] == "verify":
                 self.ha("verify", job)
                 active = self.backend.request("/status")
@@ -538,10 +587,10 @@ class Deployments:
                     or active.get("version") != job["backend"]["version"]
                 ):
                     raise ValueError("Nieprawidłowy końcowy stan backendu")
-                self.dashboard.finish(job, self.save)
+                self.dashboard.finish(job, self._save)
                 self.installer.finish()
                 job["status"] = "success"
-                self.save(job)
+                self._save(job)
                 self.coordinator.release(self.project.id, job["id"])
         except Exception:  # noqa: BLE001 - preserve durable recovery without leaking errors.
             if job is None:
@@ -550,14 +599,14 @@ class Deployments:
             job["message"] = (
                 "Import przerwany. Zachowano plan i poprzedni kod; sprawdź wskazany etap przed wznowieniem."
             )
-            self.save(job)
+            self._save(job)
         finally:
-            self.running = False
+            self._running = False
 
     def resume(self, job_id):
         with self.lock:
             job = self.read()
-            if self.running and job and job["id"] == job_id:
+            if self._running and job and job["id"] == job_id:
                 return job
             if (
                 not job
@@ -567,8 +616,8 @@ class Deployments:
                 raise ValueError("Nie można wznowić tego zadania")
             self.coordinator.claim(self.project.id, job["id"])
             job["status"] = "running"
-            self.save(job)
-            self.launch()
+            self._save(job)
+            self._launch()
 
     def cancel(self, job_id):
         with self.lock:
@@ -576,7 +625,7 @@ class Deployments:
             if not job or job["id"] != job_id or job["status"] != "review":
                 raise ValueError("Można anulować wyłącznie review")
             job["status"] = "cancelled"
-            self.save(job)
+            self._save(job)
             if self.coordinator.owner() == {
                 "project": self.project.id,
                 "id": job["id"],

@@ -55,21 +55,37 @@ class FakeBackend:
         self.active = {"sha": "a" * 40, "healthy": True, "version": "0.1.0"}
         self.target = {"version": "0.3.0", "sha": "b" * 40}
         self.calls = []
+        self.last_job = None
 
     def integration(self, backend_release, integration_version):
         return archive(integration_version)
 
     def request(self, path, value=None, *, timeout=30):
         self.calls.append((path, value))
+        if path == "/capabilities":
+            return {"recovery_receipt": 1, "minimum_version": "0.1.0"}
         if path == "/status":
             return dict(self.active)
         if path.startswith("/release"):
             return dict(self.target)
         if path == "/jobs":
+            self.last_job = dict(value)
             self.active["sha"] = value["sha"]
             self.active["version"] = value["version"]
             return {"status": "running"}
-        return {"status": "success"}
+        return {
+            **self.last_job,
+            "status": "success",
+            "recovery": {
+                "schema_version": 1,
+                "job_id": self.last_job["id"],
+                "sha": self.last_job["sha"],
+                "version": self.last_job["version"],
+                "kind": "sqlite",
+                "verified": True,
+                "sha256": "e" * 64,
+            },
+        }
 
 
 class DeploymentTest(unittest.TestCase):
@@ -101,7 +117,7 @@ class DeploymentTest(unittest.TestCase):
             sleep=lambda _: None,
         )
         # Drive the durable worker deterministically, without network or HA.
-        self.deployment.launch = lambda: None
+        self.deployment._launch = lambda: None
 
     def ha(self, action, job):
         self.events.append(action)
@@ -114,7 +130,7 @@ class DeploymentTest(unittest.TestCase):
             raise ValueError("synthetic conflict")
 
     def review(self):
-        return self.deployment.review(
+        return self.deployment._review(
             {
                 "schema_version": 2,
                 "project": "jdg",
@@ -139,7 +155,7 @@ class DeploymentTest(unittest.TestCase):
     def test_backup_then_backend_install_restart_dashboard_and_verify(self):
         job = self.review()
         self.deployment.approve(job["id"], job["review_hash"])
-        self.deployment.run()
+        self.deployment._run()
         self.assertEqual(self.deployment.read()["status"], "success")
         self.assertEqual(
             self.events,
@@ -168,7 +184,7 @@ class DeploymentTest(unittest.TestCase):
         job = self.review()
         self.deployment.approve(job["id"], job["review_hash"])
         self.fail_dashboard = True
-        self.deployment.run()
+        self.deployment._run()
         self.assertEqual(self.deployment.read()["stage"], "dashboard")
         self.assertEqual(self.deployment.read()["status"], "failed")
         # Recreate the process, preserving only persisted state.
@@ -181,10 +197,10 @@ class DeploymentTest(unittest.TestCase):
             JDG,
             self.coordinator,
         )
-        recovered.launch = lambda: None
+        recovered._launch = lambda: None
         self.fail_dashboard = False
         recovered.resume(job["id"])
-        recovered.run()
+        recovered._run()
         self.assertEqual(recovered.read()["status"], "success")
         self.assertEqual(self.events.count("restart"), 1)
         self.assertEqual(sum(path == "/jobs" for path, _ in self.backend.calls), 1)

@@ -29,7 +29,7 @@ class Recovery(unittest.TestCase):
         (f.installer.target / "__init__.py").write_bytes(b"old\xff")
         job = f.review()
         f.deployment.approve(job["id"], job["review_hash"])
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["status"], "success")
         self.assertNotIn("backup", f.events)
         path = f.deployment.directory / "recovery" / (job["id"] + ".json")
@@ -47,7 +47,7 @@ class Recovery(unittest.TestCase):
         f.deployment.dashboard.snapshot = lambda _: (_ for _ in ()).throw(
             ValueError("capture failed")
         )
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["stage"], "backup")
         self.assertEqual(f.deployment.read()["status"], "failed")
         self.assertFalse(any(path == "/jobs" for path, _ in f.backend.calls))
@@ -58,7 +58,7 @@ class Recovery(unittest.TestCase):
         job = f.review()
         f.deployment.approve(job["id"], job["review_hash"])
         f.fail_dashboard = True
-        f.deployment.run()
+        f.deployment._run()
         path = f.deployment.directory / "recovery" / (job["id"] + ".json")
         original = path.read_bytes()
         f.deployment.dashboard.snapshot = lambda _: self.fail(
@@ -66,18 +66,18 @@ class Recovery(unittest.TestCase):
         )
         f.fail_dashboard = False
         f.deployment.resume(job["id"])
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["status"], "success")
         self.assertEqual(path.read_bytes(), original)
         saved = f.deployment.read()
         saved["status"] = "running"
         saved["stage"] = "backend"
-        f.deployment.save(saved)
+        f.deployment._save(saved)
         checkpoint = json.loads(original)
         checkpoint["integration"]["__init__.py"] = base64.b64encode(b"changed").decode()
         path.write_text(json.dumps(checkpoint))
         f.backend.calls.clear()
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["status"], "failed")
         self.assertFalse(any(p == "/jobs" for p, _ in f.backend.calls))
 
@@ -89,9 +89,9 @@ class Recovery(unittest.TestCase):
         job["review_hash"] = digest(
             {k: v for k, v in job.items() if k != "review_hash"}
         )
-        f.deployment.save(job)
+        f.deployment._save(job)
         f.deployment.approve(job["id"], job["review_hash"])
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["status"], "success")
         self.assertIn("backup", f.events)
 
@@ -101,7 +101,7 @@ class Recovery(unittest.TestCase):
         job = f.review()
         self.assertFalse(job["backend_changed"])
         f.deployment.approve(job["id"], job["review_hash"])
-        f.deployment.run()
+        f.deployment._run()
         self.assertEqual(f.deployment.read()["status"], "success")
         self.assertFalse(any(p == "/jobs" for p, _ in f.backend.calls))
 
@@ -114,7 +114,7 @@ class Recovery(unittest.TestCase):
         f = self.fixture()
         job = f.review()
         job["recovery_policy"]["ha_backup"] = "full_ha"
-        f.deployment.save(job)
+        f.deployment._save(job)
         with self.assertRaises(ValueError):
             f.deployment.read()
 
@@ -131,13 +131,13 @@ class ProfileBackups(unittest.TestCase):
         )
         f.client.post("/projects/jdg/review")
         job = manager.read()
-        manager.launch = lambda: None
+        manager._launch = lambda: None
         manager.approve(job["id"], job["review_hash"])
         return f, manager, job
 
     def test_configuration_backup_excludes_history(self):
         f, manager, _ = self.fixture("ha_configuration")
-        manager.run()
+        manager._run()
         self.assertEqual(manager.read()["status"], "success")
         generated = [data for kind, data in f.actions if kind == "backup/generate"]
         self.assertEqual(len(generated), 1)
@@ -147,7 +147,7 @@ class ProfileBackups(unittest.TestCase):
 
     def test_full_backup_is_reserved_for_explicit_profile_requirement(self):
         f, manager, _ = self.fixture("full_ha")
-        manager.run()
+        manager._run()
         self.assertEqual(manager.read()["status"], "success")
         generated = [data for kind, data in f.actions if kind == "backup/generate"]
         self.assertTrue(generated[0]["include_database"])
@@ -161,6 +161,6 @@ class ProfileBackups(unittest.TestCase):
             "database_included": False,
             "agents": {"synthetic-store": {}},
         }
-        manager.run()
+        manager._run()
         self.assertEqual(manager.read()["status"], "failed")
         self.assertFalse(any(p == "/jobs" for p, _ in f.backend.calls))

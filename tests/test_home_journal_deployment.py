@@ -48,8 +48,8 @@ class JournalDeployment(unittest.TestCase):
                 coordinator,
                 sleep=lambda _: None,
             )
-            manager.launch = lambda: None
-            job = manager.review(
+            manager._launch = lambda: None
+            job = manager._review(
                 {
                     "schema_version": 2,
                     "project": "home_journal",
@@ -74,7 +74,7 @@ class JournalDeployment(unittest.TestCase):
                 coordinator,
                 sleep=lambda _: None,
             )
-            recovered.run()
+            recovered._run()
             self.assertEqual(recovered.read()["status"], "success")
             self.assertEqual(
                 events,
