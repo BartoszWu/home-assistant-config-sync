@@ -5,9 +5,16 @@ import time
 from pathlib import Path
 
 from flask import redirect, render_template_string, request
-from project_deployment import Backend, Deployments, Installer, VERSION, SHA, release_set
-from review_ui import STYLE
+from project_deployment import (
+    SHA,
+    VERSION,
+    Backend,
+    Deployments,
+    Installer,
+    release_set,
+)
 from project_profiles import PROJECTS
+from review_ui import STYLE
 
 TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 {% if job and job.status == 'running' %}<meta http-equiv="refresh" content="5">{% endif %}
@@ -21,11 +28,14 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 <div class="row"><strong>Integracja HA</strong><span class="value"><small>{{ job.integration_version_before or "Nieznana" }} → </small>{{ job.releases.integration_version }}</span></div>
 <div class="row"><strong>Dashboardy ({{ project.dashboards|length }})</strong><span class="value">Z konfiguracji<br><small>Wersja {{ job.source_sha[:7] }}</small></span></div>
 </div>
-{% if job.status == 'review' %}<p class="notice">Import wykona kopię HA, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %}{% if project.legacy_hacs_repository %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.{% endif %}</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
+{% if job.status == 'review' %}<p class="notice">Import zabezpieczy zmieniane elementy zgodnie z planem, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %}{% if project.legacy_hacs_repository %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.{% endif %}</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
 {% elif job.status == 'running' %}<p class="notice" role="status">Trwa: {{ stages.get(job.stage, job.stage) }}. Możesz zamknąć ten ekran. Postęp zostanie zapisany.</p>
 {% elif job.status == 'failed' %}<p class="notice error">Przerwano etap: {{ stages.get(job.stage, job.stage) }}. {{ job.message }}</p><form method="post" action="resume" data-busy-message="Wznawianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><button>Wznów import</button></form>
 {% else %}<p class="notice">{{ project.title }} został zaktualizowany. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź kolejną aktualizację</button></form>{% endif %}
-{% endif %}</main>
+{% endif %}
+{% if job %}<div class="panel"><strong>Zabezpieczenie aktualizacji</strong><ul>{% for item in recovery_items %}<li>{{ item }}</li>{% endfor %}</ul></div>{% endif %}
+{% if job and job.status in ('running', 'failed', 'success') %}<div class="panel"><strong>Postęp aktualizacji</strong><ol class="application-steps" aria-label="Etapy aktualizacji">{% for step in progress_steps %}<li class="step-{{ step.state }}"{% if step.state == 'current' %} aria-current="step"{% endif %}><span>{{ step.label }}</span><small>{{ step.status }}</small></li>{% endfor %}</ol></div>{% endif %}
+</main>
 <div id="project-progress" class="refresh-progress project-progress" role="status" aria-live="polite">
 <div class="refresh-progress-card"><span class="spinner" aria-hidden="true"></span><span data-busy-label></span></div>
 </div><script>{{ ui_script|safe }}</script></html>"""
@@ -37,7 +47,7 @@ LABELS = {
     "success": "Zakończono",
 }
 STAGES = {
-    "backup": "kopia i sprawdzenie HA",
+    "backup": "zabezpieczenie aktualizacji",
     "backend": "aktualizacja backendu",
     "integration": "instalacja integracji",
     "restart": "restart HA",
@@ -45,6 +55,62 @@ STAGES = {
     "dashboard": "import dashboardu",
     "verify": "kontrola działania",
 }
+
+
+PROGRESS_STEPS = (
+    ("backup", "Zabezpieczenie i sprawdzenie"),
+    ("backend", "Aktualizacja aplikacji na serwerze"),
+    ("integration", "Instalacja integracji"),
+    ("wait_ha", "Uruchomienie integracji w HA"),
+    ("dashboard", "Wgranie kart i dashboardów"),
+    ("verify", "Końcowa kontrola działania"),
+)
+
+
+def progress_steps(job):
+    stage = "wait_ha" if job.get("stage") == "restart" else job.get("stage")
+    names = [name for name, _ in PROGRESS_STEPS]
+    if stage not in names:
+        return []
+    index = names.index(stage)
+    result = []
+    for position, (name, label) in enumerate(PROGRESS_STEPS):
+        state = (
+            "done"
+            if job["status"] == "success" or position < index
+            else "current"
+            if position == index
+            else "pending"
+        )
+        status = (
+            "Gotowe"
+            if state == "done"
+            else "Oczekuje"
+            if state == "pending"
+            else "Wymaga uwagi"
+            if job["status"] == "failed"
+            else "W toku"
+        )
+        if name == "backend" and not job.get("backend_changed", True):
+            state, status = "done", "Bez zmian"
+        result.append({"label": label, "state": state, "status": status})
+    return result
+
+
+def recovery_items(job):
+    policy = job.get("recovery_policy")
+    if policy is None:
+        return ["Kopia HA z historią — zatwierdzony wcześniejszy plan"]
+    items = ["Poprzedni kod integracji oraz zmieniane karty, dashboardy i zasoby"]
+    if policy["backend_data"] == "executor" and job.get("backend_changed", True):
+        items.append("Dane aplikacji są kopiowane przez wykonawcę przed ich zmianą")
+    if policy["ha_backup"] == "targeted":
+        items.append("Bez kopii całego HA i jego historii")
+    elif policy["ha_backup"] == "ha_configuration":
+        items.append("Dodatkowa kopia konfiguracji HA, bez bazy historii")
+    else:
+        items.append("Dodatkowa kopia HA wraz z bazą historii")
+    return items
 
 
 def register(
@@ -103,6 +169,10 @@ def register(
                     )
                 hacs_repository()
             elif action == "backup":
+                include_database = (
+                    job.get("recovery_policy", {}).get("ha_backup", "full_ha")
+                    == "full_ha"
+                )
                 name = project.title + " przed importem " + job["id"]
                 settings = ha_call("backup/config/info")["config"]["create_backup"]
                 agents = settings.get("agent_ids")
@@ -119,7 +189,7 @@ def register(
                         agent_ids=agents,
                         include_addons=[],
                         include_all_addons=False,
-                        include_database=True,
+                        include_database=include_database,
                         include_folders=[],
                         include_homeassistant=True,
                         name=name,
@@ -137,7 +207,7 @@ def register(
                         backup = backups[0]
                         if (
                             not backup.get("homeassistant_included")
-                            or not backup.get("database_included")
+                            or bool(backup.get("database_included")) != include_database
                             or backup.get("failed_agent_ids")
                             or backup.get("failed_folders")
                             or backup.get("failed_addons")
@@ -216,6 +286,8 @@ def register(
             error=error,
             labels=LABELS,
             stages=STAGES,
+            recovery_items=recovery_items(job) if job else [],
+            progress_steps=progress_steps(job) if job else [],
             ui_style=STYLE,
             ui_script=SCRIPT,
         )
@@ -235,31 +307,41 @@ def register(
                 # Do not use get_manager: opening this list must never launch work.
                 try:
                     job = Deployments(
-                        directory, Installer(ha_root, project), None, None, None,
-                        project, coordinator,
+                        directory,
+                        Installer(ha_root, project),
+                        None,
+                        None,
+                        None,
+                        project,
+                        coordinator,
                     ).read()
                     if job and (
-                        job.get("status") not in {"review", "running", "failed", "success", "cancelled"}
+                        job.get("status")
+                        not in {"review", "running", "failed", "success", "cancelled"}
                         or not isinstance(job.get("source_sha"), str)
                         or not SHA.fullmatch(job["source_sha"])
                     ):
                         raise ValueError("Invalid saved project plan")
                     if job and job["status"] in {"review", "running", "failed"}:
                         pinned_target = release_set(job["releases"], project)
-                except Exception:
+                except Exception:  # noqa: BLE001 - unreadable plans stay unknown.
                     job = None
                     read_error = True
                 if configured:
                     try:
                         active = backend_factory(config).request("/status", timeout=4)
                         version = active.get("version")
-                        if active.get("healthy") is True and isinstance(version, str) and VERSION.fullmatch(version):
+                        if (
+                            active.get("healthy") is True
+                            and isinstance(version, str)
+                            and VERSION.fullmatch(version)
+                        ):
                             backend_version = version
-                    except Exception:
+                    except Exception:  # noqa: BLE001, S110 - credential-bearing errors stay private.
                         pass
                 try:
                     loaded = ha_call(project.domain + "/version", _timeout=4)
-                except Exception:
+                except Exception:  # noqa: BLE001 - unavailable HA stays unknown.
                     loaded = None
                 if isinstance(loaded, dict) and loaded.get("loaded") is True:
                     version = loaded.get("version")
@@ -274,11 +356,15 @@ def register(
             ):
                 version = displayed_target.get(key) if displayed_target else None
                 available = target.get(key) if pinned_target and target else None
-                components.append({
-                    "label": label, "current": current, "target_label": target_label,
-                    "target": version,
-                    "available_target": available if available != version else None,
-                })
+                components.append(
+                    {
+                        "label": label,
+                        "current": current,
+                        "target_label": target_label,
+                        "target": version,
+                        "available_target": available if available != version else None,
+                    }
+                )
             has_new_versions = any(c["available_target"] for c in components)
             state, label, action = "same", "Bez zmian", "Otwórz"
             description = "Wersje zgodne z konfiguracją"
@@ -300,18 +386,28 @@ def register(
                 state, label = "unknown", "Nie udało się sprawdzić"
                 description = "Sprawdź połączenie i zestaw wersji"
             elif any(c["current"] and c["current"] != c["target"] for c in components):
-                state, label, action = "update", "Dostępna zmiana", "Sprawdź aktualizację"
+                state, label, action = (
+                    "update",
+                    "Dostępna zmiana",
+                    "Sprawdź aktualizację",
+                )
                 description = "Wersje do zmiany"
             elif any(not c["current"] for c in components):
                 state, label = "unknown", "Nie udało się sprawdzić"
                 description = "Sprawdź połączenie i zestaw wersji"
-            result.append({
-                "id": project.id, "title": project.title, "state": state,
-                "status_label": label, "action_label": action,
-                "description": description, "components": components,
-                "has_new_versions": has_new_versions,
-                "availability_unknown": bool(pinned_target and not target),
-            })
+            result.append(
+                {
+                    "id": project.id,
+                    "title": project.title,
+                    "state": state,
+                    "status_label": label,
+                    "action_label": action,
+                    "description": description,
+                    "components": components,
+                    "has_new_versions": has_new_versions,
+                    "availability_unknown": bool(pinned_target and not target),
+                }
+            )
         return result
 
     app.extensions["project_overview"] = overview

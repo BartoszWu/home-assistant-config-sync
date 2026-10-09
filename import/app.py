@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -12,7 +13,7 @@ from review_ui import TEMPLATE, STYLE, SCRIPT, configuration_groups, review_summ
 from project_deployment import Coordinator, DeploymentBusy, release_set
 from project_profiles import PROJECTS
 from dashboard_sync import DashboardSync
-from managed_files import read_snapshot, resolve_live_path
+from managed_files import read_snapshot, resolve_live_path, list_lovelace_resources, find_matching_lovelace_resources
 from werkzeug.datastructures import MultiDict
 
 from dashboard_logic import (
@@ -1165,6 +1166,22 @@ class DashboardAccess:
         if len(matches) != 1:
             raise ValueError("Resource not found")
         return matches[0]["preview_ha_hash"]
+
+    def snapshot(self, kind, relative):
+        if kind == "dashboard":
+            return {"encoding": "json", "data": ha_dashboard_config(relative)}
+        if kind == "managed":
+            current = read_snapshot(resolve_live_path(HA_CONFIG_ROOT, relative))
+            return {"encoding": "base64", "data": (
+                base64.b64encode(current.data).decode() if current.exists else None
+            )}
+        matches = find_matching_lovelace_resources(list_lovelace_resources(ha_ws_call), relative)
+        changes = [i for i in collect_resource_changes(
+            MANAGED_POLICY, ha_ws_call, managed_entries_for_revision()
+        ) if i["relative"] == relative]
+        if len(changes) != 1 or len(matches) > 1:
+            raise ValueError("Ambiguous resource recovery snapshot")
+        return {"encoding": "json", "data": changes[0]["current"], "resources": matches}
 
     def provenance(self, kind, relative):
         store = live_provenance_store()

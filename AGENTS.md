@@ -36,9 +36,12 @@ Standalone code checks must not depend on private sibling files.
 - No `.storage` access or broader host mounts. Reviewed profiles in
   `import/project_profiles.py` authorize code installation only in their exact
   integration/staging/previous directories; `project_apparmor.py` derives the
-  permission policy. Currently JDG is the only production profile. Git selects
+  permission policy. JDG and Home Journal are production profiles. Git selects
   versions, not privileges. Restart only within an approved persisted plan after
-  HA backup, with shared durable ownership across projects and ordinary Apply.
+  the recovery required by the reviewed profile, with shared durable ownership
+  across projects and ordinary Apply. Targeted checkpoints preserve changed
+  artifacts; backend executors preserve their own data. See README recovery
+  policy before adding migrations or changing backup scope.
   HACS takeover may unregister only the profile’s exact legacy repo,
   never uninstall it. Ordinary managed-file allowlists remain in App code and
   must reject all `custom_components` paths. Preserve guards and AppArmor;

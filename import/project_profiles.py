@@ -6,6 +6,21 @@ from pathlib import PurePosixPath
 
 
 @dataclass(frozen=True)
+class RecoveryPolicy:
+    ha_backup: str = "targeted"
+    backend_data: str = "none"
+
+    def __post_init__(self):
+        if self.ha_backup not in {"targeted", "ha_configuration", "full_ha"}:
+            raise ValueError("Invalid HA recovery policy")
+        if self.backend_data not in {"none", "executor"}:
+            raise ValueError("Invalid backend data recovery policy")
+
+    def identity(self):
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Project:
     id: str
     title: str
@@ -16,9 +31,12 @@ class Project:
     resources: tuple[str, ...]
     minimum_backend: tuple[int, int, int]
     minimum_integration: tuple[int, int, int]
+    recovery: RecoveryPolicy
     legacy_hacs_repository: str | None = None
 
     def __post_init__(self):
+        if not isinstance(self.recovery, RecoveryPolicy):
+            raise TypeError("Recovery policy must be reviewed App code")
         if not re.fullmatch(r"[a-z][a-z0-9_]*", self.id) or not re.fullmatch(
             r"[a-z][a-z0-9_]*", self.domain
         ):
@@ -48,6 +66,11 @@ class Project:
             for v in (self.dashboards, self.bundles, self.resources)
         ):
             raise ValueError("Duplicate project artifacts")
+
+    def legacy_identity(self):
+        value = self.identity()
+        del value["recovery"]
+        return value
 
     def identity(self):
         value = asdict(self)
@@ -87,6 +110,7 @@ JDG = Project(
     minimum_backend=(0, 3, 0),
     minimum_integration=(0, 7, 0),
     legacy_hacs_repository="BartoszWu/ha-jdg-ksiegowy",
+    recovery=RecoveryPolicy(backend_data="executor"),
 )
 HOME_JOURNAL = Project(
     id="home_journal",
@@ -100,5 +124,6 @@ HOME_JOURNAL = Project(
     resources=("/local/dashboard/home-journal.mjs",),
     minimum_backend=(0, 2, 0),
     minimum_integration=(0, 2, 0),
+    recovery=RecoveryPolicy(backend_data="executor"),
 )
 PROJECTS = {p.id: p for p in (JDG, HOME_JOURNAL)}

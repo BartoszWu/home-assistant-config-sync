@@ -16,32 +16,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import Request
 
+from project_recovery import RecoveryCheckpoint, atomic_json, digest
+
 VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 MAX_ARCHIVE = 2 * 1024 * 1024
-
-
-def digest(value):
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-
-
-def atomic_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf8") as handle:
-        os.chmod(temporary, 0o600)
-        json.dump(value, handle)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
-    descriptor = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def release_set(value, project):
@@ -135,6 +115,19 @@ class Installer:
                 raise ValueError("Niezarządzany plik w integracji")
             files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         return digest(files)
+
+    def recovery_snapshot(self):
+        before = self.snapshot()
+        files = {
+            path.relative_to(self.target).as_posix(): base64.b64encode(
+                path.read_bytes()
+            ).decode()
+            for path in self.target.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+        if self.snapshot() != before:
+            raise ValueError("Integration changed during recovery capture")
+        return files
 
     def install(self, files, reviewed_hash):
         expected = digest({k: hashlib.sha256(v).hexdigest() for k, v in files.items()})
@@ -335,13 +328,25 @@ class Deployments:
         self.sleep = sleep
         self.lock = threading.RLock()
         self.running = False
+        self.recovery = RecoveryCheckpoint(self.directory, installer, dashboard)
 
     def read(self):
         path = self.directory / "job.json"
         job = json.loads(path.read_text()) if path.exists() else None
         if job and (
             job.get("project") != self.project.id
-            or job.get("profile_hash") != digest(self.project.identity())
+            or (
+                "recovery_policy" in job
+                and job["recovery_policy"] != self.project.recovery.identity()
+            )
+            or (
+                job.get("profile_hash") != digest(self.project.identity())
+                and not (
+                    "recovery_policy" not in job
+                    and job.get("profile_hash")
+                    == digest(self.project.legacy_identity())
+                )
+            )
         ):
             raise ValueError(
                 "Stored plan requires its original reviewed project profile"
@@ -382,11 +387,15 @@ class Deployments:
                 "profile_hash": digest(self.project.identity()),
                 "status": "review",
                 "stage": "backup",
+                "recovery_policy": self.project.recovery.identity(),
                 "releases": releases,
                 "source_sha": source_sha,
                 "dashboard": dashboard_plan,
                 "backend": backend,
                 "backend_before": active,
+                "backend_changed": any(
+                    active.get(k) != backend[k] for k in ("sha", "version")
+                ),
                 "integration_before": self.installer.snapshot(),
                 "archive_hash": checksum,
                 "restart": False,
@@ -461,22 +470,31 @@ class Deployments:
             if not job or job["status"] != "running":
                 return
             self.coordinator.claim(self.project.id, job["id"])
+            if "recovery_policy" in job and job["stage"] != "backup":
+                self.recovery.prepare(job, self.save)
             if job["stage"] == "backup":
                 self.ha("check", job)
-                self.ha("backup", job)
+                if "recovery_policy" in job:
+                    self.recovery.prepare(job, self.save)
+                    if job["recovery_policy"]["ha_backup"] != "targeted":
+                        self.ha("backup", job)
+                else:
+                    # An approved legacy plan keeps its original HA backup.
+                    self.ha("backup", job)
                 self.advance(job, "backend")
             if job["stage"] == "backend":
-                value = {"id": job["id"], **job["backend"]}
-                self.backend.request("/jobs", value)
-                for _ in range(360):
-                    result = self.backend.request("/jobs/" + job["id"])
-                    if result["status"] == "success":
-                        break
-                    if result["status"] != "running":
-                        raise ValueError("Aktualizacja backendu nie powiodła się")
-                    self.sleep(5)
-                else:
-                    raise TimeoutError("Aktualizacja backendu nie zakończyła się")
+                if job.get("backend_changed", True):
+                    value = {"id": job["id"], **job["backend"]}
+                    self.backend.request("/jobs", value)
+                    for _ in range(360):
+                        result = self.backend.request("/jobs/" + job["id"])
+                        if result["status"] == "success":
+                            break
+                        if result["status"] != "running":
+                            raise ValueError("Aktualizacja backendu nie powiodła się")
+                        self.sleep(5)
+                    else:
+                        raise TimeoutError("Aktualizacja backendu nie zakończyła się")
                 self.advance(job, "integration")
             if job["stage"] == "integration":
                 data = (self.directory / "integration.zip").read_bytes()

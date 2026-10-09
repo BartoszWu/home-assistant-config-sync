@@ -107,6 +107,14 @@ class UI(unittest.TestCase):
                     return hashlib.sha256(self.bundle.read_bytes()).hexdigest()
                 return self.items[kind]["preview_ha_hash"]
 
+            def snapshot(inner, kind, relative):
+                if kind == "dashboard":
+                    return {"encoding": "json", "data": copy.deepcopy(self.live_dashboard)}
+                if kind == "managed":
+                    import base64
+                    return {"encoding": "base64", "data": base64.b64encode(self.bundle.read_bytes()).decode()}
+                raise AssertionError(kind)
+
             def provenance(inner, kind, relative):
                 if not inner.provenance_available:
                     return None
@@ -176,7 +184,7 @@ class UI(unittest.TestCase):
                 "name": kwargs["name"],
                 "backup_id": "synthetic-backup",
                 "homeassistant_included": True,
-                "database_included": True,
+                "database_included": kwargs["include_database"],
                 "agents": {"synthetic-store": {}},
                 "failed_agent_ids": [],
             }
@@ -354,18 +362,27 @@ class UI(unittest.TestCase):
         self.assertEqual(self.manager().read()["status"], "success")
         self.assertFalse(self.hacs)
         self.assertEqual(sum(kind == "export" for kind, _ in self.actions), 1)
-        self.assertLess(
-            next(
-                i
-                for i, (kind, data) in enumerate(self.actions)
-                if kind == "backup/generate"
-            ),
-            next(
-                i
-                for i, (kind, _) in enumerate(self.actions)
-                if kind == "hacs/repositories/remove"
-            ),
-        )
+        self.assertFalse(any(kind.startswith("backup/") for kind, _ in self.actions))
+        checkpoint = self.root / "data/jdg/recovery" / (job["id"] + ".json")
+        saved = json.loads(checkpoint.read_text())
+        self.assertEqual(saved["dashboard"]["dashboard:dashboard-faktury.json"]["data"], {"old": True})
+        self.assertEqual(checkpoint.stat().st_mode & 0o777, 0o600)
+
+    def test_progress_and_recovery_scope_are_visible_without_javascript(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        job["status"] = "running"
+        job["stage"] = "integration"
+        self.manager().save(job)
+        self.manager().launch = lambda: None
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn('aria-current="step"', html)
+        self.assertIn("Postęp aktualizacji", html)
+        self.assertIn("Bez kopii całego HA i jego historii", html)
+        self.assertIn("Gotowe", html)
+        self.assertIn("W toku", html)
+        self.assertIn("Oczekuje", html)
+        self.assertNotIn("backup_id", html)
 
     def test_warnings_block_shortcut_without_writes(self):
         self.items["dashboard"]["warnings"] = [{"reason": "synthetic warning"}]
@@ -373,14 +390,10 @@ class UI(unittest.TestCase):
         self.assertIsNone(self.manager().read())
         self.assertFalse(any(kind == "call_service" for kind, _ in self.actions))
 
-    def test_failed_backup_does_not_start_backend(self):
+    def test_failed_checkpoint_does_not_start_backend(self):
         self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
         job = self.manager().read()
-        self.manager().ha = lambda action, _: (
-            (_ for _ in ()).throw(ValueError("backup failed"))
-            if action == "backup"
-            else None
-        )
+        self.access.snapshot = lambda *args: (_ for _ in ()).throw(ValueError("capture failed"))
         self.manager().launch = lambda: None
         self.manager().approve(job["id"], job["review_hash"])
         self.manager().run()

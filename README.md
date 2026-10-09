@@ -300,14 +300,17 @@ revision-aware notifications, candidate review, and runtime-only no-commit behav
 
 ## Import projektów z backendem na serwerze
 
-Import 0.12.0 udostępnia **Aktualizacje projektów → JDG → Sprawdź aktualizację →
-Importuj JDG**. Wspólny moduł przygotowuje niezmienny plan, wykonuje backup HA,
+Import udostępnia **Aktualizacje projektów → aplikacja → Sprawdź aktualizację →
+Importuj** dla JDG i Dziennika domu. Wspólny moduł przygotowuje niezmienny plan
+i zapisuje kopie zmienianych elementów,
 aktualizuje backend i integrację, restartuje Core gdy potrzeba, stosuje zestaw
 dashboardów i sprawdza działanie. Przyciski na ekranie projektu pokazują od razu
 stan oczekiwania, również podczas powrotu do Importu i anulowania przygotowanej
 aktualizacji. Anulowanie potwierdza komunikat; nie uruchamia importu. Link i formularze
 działają także bez JavaScriptu. JDG jest pierwszym profilem; ten sam moduł
-jest testowany także z drugim syntetycznym projektem i inną paczką integracji.
+jest testowany także z syntetycznym projektem i inną paczką integracji.
+Lista etapów pokazuje wykonane kroki, aktualny etap i kroki oczekujące. Nie
+udaje procentów zadań, których czas zależy od serwera lub HA.
 
 `import/project_profiles.py` określa obsługiwane projekty: domenę, dokładne pliki
 integracji, dashboardy, moduły JS, zasoby i minimalne wersje kontraktu.
@@ -315,13 +318,15 @@ Dodanie projektu wymaga przeglądu profilu i uprawnień App oraz adaptera wykona
 po stronie jego backendu. Git wybiera wersje wyłącznie już obsługiwanych profili;
 nie może dodawać poleceń, repozytoriów ani uprawnień instalacji. Generator
 `project_apparmor.py` wyprowadza dokładne katalogi instalatora z tego rejestru.
-Obecnie produkcyjny rejestr zawiera tylko JDG; zwykłe managed files nadal
+Produkcyjny rejestr zawiera JDG i Dziennik domu; zwykłe managed files nadal
 odrzucają wszystkie `custom_components`, pozostałe integracje i `.storage`
 pozostają zablokowane. Pierwsza instalacja backendu/wpisu integracji jest
 bootstrapem, a nie operacją tego modułu aktualizacji.
 
 Wykonawca działa w dedykowanym gościu backendu i posiada własny ograniczony
-GitHub token **Contents: read-only** do prywatnego repo produktu. Źródła integracji
+GitHub deploy key SSH **read-only** albo token **Contents: read-only** do
+prywatnego repo produktu. Sposób uwierzytelniania jest lokalną konfiguracją
+wykonawcy; Import nie potrzebuje nowego PAT dla każdego projektu. Źródła integracji
 JDG oraz ZIP i SHA-256 są wydawane w tym samym prywatnym repo co backend.
 Import pobiera paczkę przez uwierzytelniony lokalny `GET /integration?version=...`;
 potwierdza jej powiązanie z SHA wybranego backendu, wersję, checksum i allowlistę
@@ -361,12 +366,60 @@ scalamy zestaw konfiguracji. Dashboardy i moduły pochodzą z tego samego
 zatwierdzonego SHA konfiguracji. Konflikty lub ostrzeżenia zatrzymują skrót;
 rozwiąż je w zwykłym review. Integracja musi być już skonfigurowana i działająca.
 
-`backup/generate` kopiuje HA z bazą do skonfigurowanych miejsc, zachowując hasło;
-Import potwierdza ukończenie. Kopia pomija Apps, aby nie zatrzymać własnego
-wykonawcy. JDG ma jednorazowe przejęcie zarządzania: `hacs/repositories/list`
-i `remove` dla dokładnego dawnego repo/domeny, ze sprawdzeniem zachowania plików.
-Nie używamy uninstall ani nie usuwamy całego HACS. Dopiero po sprawdzonej
-migracji repo integracji można zmienić na prywatne i zarchiwizować.
+### Wspólna polityka odzyskiwania
+
+`RecoveryPolicy` w przeglądanym profilu określa wymagane zabezpieczenia;
+Git nie może ich wyłączyć. JDG i Dziennik używają `targeted`:
+
+- Import zapisuje poprzedni kod integracji oraz stan zmienianych dashboardów,
+  modułów JS i zasobów w prywatnym `/data/projects/<id>/recovery/<job-id>.json`.
+  Checkpoint jest związany z zatwierdzonym planem i hashem profilu, ma uprawnienia
+  0600 i pozostaje po zakończeniu. Wznowienie zachowuje pierwotne kopie, a brak,
+  niezgodność lub uszkodzenie checkpointu zatrzymują zadanie przed kolejną zmianą.
+- Wykonawca aktualizowanej aplikacji odpowiada za spójną kopię SQL i innych danych
+  trudnych do odtworzenia, przed zmianą kodu/danych. JDG zachowuje swój istniejący
+  backup stanu; Dziennik zachowuje sprawdzany backup SQLite. Import nie kopiuje
+  baz gości przez mount HA. Jeżeli wersja i SHA backendu już odpowiadają planowi,
+  nie zleca wdrożenia backendu ani ponownej kopii jego danych.
+- HA i jego historia nie są kopiowane przy zwykłej aktualizacji tych profili.
+  Zmiany kart/dashboardów mają własny rollback i odczyt po zapisie.
+
+Profil ingerujący w trwałe ustawienia HA wymaga `ha_configuration`: kopii HA
+bez bazy historii, bez Apps. `full_ha` pozostawia bazę historii dla operacji,
+których odzyskanie wymaga również tych danych. Szersza kopia jest wykonywana
+przez API HA do skonfigurowanych miejsc, z zachowaniem hasła i sprawdzeniem
+kompletności. Brak wymaganej kopii zatrzymuje plan. Przy zmianach migracji wpisów
+integracji lub rejestrów trzeba ponownie ocenić politykę profilu przed wydaniem.
+Starsze zapisane plany zachowują wcześniej zatwierdzony backup HA wraz z historią.
+
+Checkpoint nie jest automatycznym cofnięciem całej aktualizacji. Przy awarii
+instalator zachowuje poprzednią integrację, wykonawca odzyskuje poprzedni kod,
+a wspólny Apply wykonuje swój rollback. Kopia w `/data` pozwala odzyskać dokładne
+wcześniejsze pliki i definicje także po końcowej kontroli. Dashboardy i zasoby
+przywraca się przez ich API; pliki integracji przez kontrolowany instalator.
+Odtworzenie SQL pozostaje osobną, świadomą operacją: może utracić nowsze dane.
+Nie przywracamy całego HA ani SQL automatycznie i nie usuwamy istniejących kopii.
+
+JDG ma jednorazowe przejęcie zarządzania: `hacs/repositories/list` i `remove`
+dla dokładnego dawnego repo/domeny, ze sprawdzeniem zachowania plików. Nie
+używamy uninstall ani nie usuwamy całego HACS.
+
+### Dodanie kolejnej aplikacji
+
+1. Dodaj `Project` do `PROJECTS` z dokładnymi plikami, domeną i artefaktami.
+   Określ `RecoveryPolicy`: domyślny `targeted` tylko dla odwracalnych zmian,
+   `backend_data="executor"` gdy aplikacja posiada trwałe dane. Zweryfikuj
+   rzeczywistą kopię tych danych w adapterze wykonawcy; sama deklaracja jej nie tworzy.
+2. Wykonawca realizuje ten sam kontrakt `GET /status`, `/release`, `/integration`,
+   `POST /jobs` i `GET /jobs/<id>`, przyjmując wyłącznie przypięte wydania/SHA.
+   Różnice języka, jednostek systemd i bazy pozostają w jego adapterze.
+3. Dodaj manifest `deployments/<id>.json` do repo konfiguracji HA oraz lokalne
+   `<id>.json` i dedykowany klucz połączenia w `/review`. Bootstrap wykonawcy
+   wymaga osobnego zlecenia; nie kopiuj poświadczeń do Git.
+4. Zaktualizuj generowaną politykę AppArmor i dodaj syntetyczny test całego
+   przeglądu, zatwierdzenia, checkpointu, aktualizacji i wznowienia. Nowa aplikacja
+   korzysta z `Deployments`, `RecoveryCheckpoint`, `DashboardSync` i tego samego UI;
+   nie twórz osobnej kolejności wdrożenia ani osobnego ekranu aktualizacji.
 
 Stan każdego projektu jest oddzielny w `/data/projects/<id>`, a trwały
 `owner.json` rezerwuje HA dla jednego zatwierdzonego zadania. Pozostałe projekty

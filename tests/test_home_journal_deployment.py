@@ -32,6 +32,7 @@ class JournalDeployment(unittest.TestCase):
                 "Dashboard",
                 (),
                 {
+                    "snapshot": lambda *args: {},
                     "apply": lambda *args: events.append("dashboard"),
                     "finish": lambda *args: None,
                 },
@@ -81,8 +82,7 @@ class JournalDeployment(unittest.TestCase):
                     "current_version",
                     "check",
                     "check",
-                    "backup",
-                    "takeover",
+                        "takeover",
                     "restart",
                     "verify",
                     "dashboard",
