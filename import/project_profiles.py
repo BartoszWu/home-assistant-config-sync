@@ -88,4 +88,17 @@ JDG = Project(
     minimum_integration=(0, 7, 0),
     legacy_hacs_repository="BartoszWu/ha-jdg-ksiegowy",
 )
-PROJECTS = {JDG.id: JDG}
+HOME_JOURNAL = Project(
+    id="home_journal",
+    title="Dziennik domu",
+    domain="home_journal",
+    files=frozenset(
+        {"__init__.py", "client.py", "config_flow.py", "manifest.json", "strings.json"}
+    ),
+    dashboards=("dashboard-home-journal.json",),
+    bundles=("www/dashboard/home-journal.mjs",),
+    resources=("/local/dashboard/home-journal.mjs",),
+    minimum_backend=(0, 2, 0),
+    minimum_integration=(0, 2, 0),
+)
+PROJECTS = {p.id: p for p in (JDG, HOME_JOURNAL)}

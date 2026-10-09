@@ -135,6 +135,7 @@ class UI(unittest.TestCase):
             config_directory=self.root,
             directory=self.root / "data",
             backend_factory=lambda _: self.backend,
+            projects={JDG.id: JDG},
         )
         self.manager = lambda: manager("jdg")
         self.client = self.app.test_client()
