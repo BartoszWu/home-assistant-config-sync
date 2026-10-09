@@ -21,7 +21,7 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 <div class="row"><strong>Integracja HA</strong><span class="value"><small>{{ job.integration_version_before or "Nieznana" }} → </small>{{ job.releases.integration_version }}</span></div>
 <div class="row"><strong>Dashboardy ({{ project.dashboards|length }})</strong><span class="value">Z konfiguracji<br><small>Wersja {{ job.source_sha[:7] }}</small></span></div>
 </div>
-{% if job.status == 'review' %}<p class="notice">Import wykona kopię HA, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
+{% if job.status == 'review' %}<p class="notice">Import wykona kopię HA, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %}{% if project.legacy_hacs_repository %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.{% endif %}</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
 {% elif job.status == 'running' %}<p class="notice" role="status">Trwa: {{ stages.get(job.stage, job.stage) }}. Możesz zamknąć ten ekran. Postęp zostanie zapisany.</p>
 {% elif job.status == 'failed' %}<p class="notice error">Przerwano etap: {{ stages.get(job.stage, job.stage) }}. {{ job.message }}</p><form method="post" action="resume" data-busy-message="Wznawianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><button>Wznów import</button></form>
 {% else %}<p class="notice">{{ project.title }} został zaktualizowany. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź kolejną aktualizację</button></form>{% endif %}
@@ -296,12 +296,15 @@ def register(
             elif not configured:
                 state, label = "unconfigured", "Połącz wykonawcę"
                 description = "Potrzebna jednorazowa konfiguracja"
-            elif not target or any(not c["current"] for c in components):
+            elif not target or not components[0]["current"]:
                 state, label = "unknown", "Nie udało się sprawdzić"
                 description = "Sprawdź połączenie i zestaw wersji"
-            elif any(c["current"] != c["target"] for c in components):
+            elif any(c["current"] and c["current"] != c["target"] for c in components):
                 state, label, action = "update", "Dostępna zmiana", "Sprawdź aktualizację"
                 description = "Wersje do zmiany"
+            elif any(not c["current"] for c in components):
+                state, label = "unknown", "Nie udało się sprawdzić"
+                description = "Sprawdź połączenie i zestaw wersji"
             result.append({
                 "id": project.id, "title": project.title, "state": state,
                 "status_label": label, "action_label": action,

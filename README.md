@@ -400,3 +400,20 @@ przywracania baz. Schema 1 i eksperymentalny `/data/jdg` z niewydanego PR 0.11.0
 nie są migrowane automatycznie: przerwane próby trzeba najpierw dokończyć/odzyskać
 na poprzednim kodzie. Produkcyjne Import/Apply, restart i bootstrap wymagają
 osobnego zlecenia; ta zmiana przygotowuje PR, nie wykonuje wdrożenia.
+
+### Dziennik domu w aktualizacjach aplikacji
+
+Profil `home_journal` aktualizuje backend/narratora w LXC, integrację
+`home_journal`, `dashboard-home-journal.json` i moduł karty. Korzysta z tego
+samego zatwierdzanego planu, backupu HA, sprawdzania konfliktów i trwałego
+wznawiania co JDG. Nie rozszerza dostępu do innych integracji ani `.storage`.
+Wersje wybiera `deployments/home_journal.json` w prywatnym repo konfiguracji;
+adres i klucz wykonawcy pozostają lokalnie w `/review/home_journal.json` oraz
+pliku tokena obok niego. Brak wykonawcy pokazuje „Połącz wykonawcę”.
+
+Jednorazowe przygotowanie LXC i cykl wydań opisuje
+[runbook Home Journal](https://github.com/BartoszWu/homelab/blob/main/home-journal/deploy/IMPORT.md).
+Po jego przygotowaniu: **Dziennik domu → Sprawdź aktualizację → Importuj
+Dziennik domu**. Przy pierwszej migracji integracji 0.1.0 jej wersja LIVE może
+być nieznana; review nadal pozwala zainstalować nowy kod z wymaganym restartem.
+Nie wgrywaj osobno samej karty historii przed zmianą backendu/integracji.
