@@ -307,6 +307,92 @@ class UI(unittest.TestCase):
         self.assertEqual(self.manager().read()["status"], "success")
         self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
 
+    def saved_success(self):
+        self.client.post("/projects/jdg/review")
+        job = self.manager().read()
+        job["status"] = "success"
+        self.manager()._save(job)
+        self.manager().installer.target.mkdir(parents=True)
+        self.backend.active["version"] = "0.3.0"
+        self.backend.calls.clear()
+        self.actions.clear()
+        return job
+
+    def test_project_link_shows_published_release_before_previous_success(self):
+        job = self.saved_success()
+        self.backend.published = {"version": "0.4.0", "sha": "d" * 40, "integration_version": "0.7.0"}
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Nowe wydanie", html)
+        self.assertIn("0.4.0", html)
+        self.assertLess(html.index("0.4.0"), html.index("Poprzednia aktualizacja"))
+        self.assertIn('<details class="previous-update">', html)
+        self.assertNotIn('<details class="previous-update" open', html)
+        self.assertEqual(self.manager().read(), job)
+        self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
+        self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
+        self.backend.target = {"version": "0.4.0", "sha": "d" * 40}
+        response = self.client.post("/projects/jdg/review")
+        self.assertEqual(response.status_code, 303)
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Importuj JDG", html)
+        self.assertEqual(self.manager().read()["releases"]["backend_version"], "0.4.0")
+        self.assertEqual(self.manager().read()["status"], "review")
+        self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
+
+    def test_previous_success_does_not_hide_failed_publication_check(self):
+        job = self.saved_success()
+        self.backend.published = {"version": "0.4.0", "sha": "invalid", "integration_version": "0.7.0"}
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Nie udało się sprawdzić", html)
+        self.assertNotIn("Masz najnowsze opublikowane wydanie", html)
+        self.assertEqual(self.manager().read(), job)
+
+    def test_journal_details_check_only_journal_with_both_projects_configured(self):
+        from project_profiles import HOME_JOURNAL
+        job = self.saved_success()
+        app = Flask(__name__)
+        checked = []
+        (self.root / "home_journal.json").write_text("{}")
+
+        def backend(config):
+            checked.append(config.name)
+            return self.backend
+
+        def ha_call(kind, **kwargs):
+            self.assertEqual(kind, "home_journal/version")
+            return {"loaded": True, "version": "0.2.0"}
+
+        managers = register(
+            app, DashboardSync(self.access), ha_call, self.root,
+            Coordinator(self.root / "data"), config_directory=self.root,
+            directory=self.root / "data", backend_factory=backend,
+        )
+        job.update(project=HOME_JOURNAL.id, profile_hash=digest(HOME_JOURNAL.identity()),
+                   recovery_policy=HOME_JOURNAL.recovery.identity())
+        job["releases"] = {"schema_version": 2, "project": "home_journal",
+                           "backend_version": "0.2.0", "integration_version": "0.2.0"}
+        managers("home_journal")._save(job)
+        self.backend.active["version"] = "0.2.0"
+        self.backend.published = {"version": "0.3.2", "sha": "d" * 40, "integration_version": "0.2.0"}
+        self.backend.calls.clear()
+        checked.clear()
+        html = app.test_client().get("/projects/home_journal/").get_data(as_text=True)
+        self.assertIn("Nowe wydanie", html)
+        self.assertIn("0.3.2", html)
+        self.assertIn("Poprzednia aktualizacja", html)
+        self.assertEqual(checked, ["home_journal.json", "home_journal.json"])
+        self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
+        self.assertEqual(managers("home_journal").read(), job)
+
+    def test_success_with_current_release_shows_fresh_versions_and_history(self):
+        job = self.saved_success()
+        self.backend.published = {"version": "0.3.0", "sha": "b" * 40, "integration_version": "0.7.0"}
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Masz najnowsze opublikowane wydanie", html)
+        self.assertIn("Poprzednia aktualizacja", html)
+        self.assertNotIn("Nowe wydanie", html)
+        self.assertEqual(self.manager().read(), job)
+
     def test_unreachable_service_keeps_known_integration_and_redacts_error(self):
         self.manager().installer.target.mkdir(parents=True)
         self.backend.request = lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("sensitive synthetic URL"))

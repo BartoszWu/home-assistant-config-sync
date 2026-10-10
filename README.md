@@ -139,8 +139,11 @@ Import needs no GitHub write key or version-promotion PR. These
 are read-only metadata/status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
 remain unknown. Saved pending/failed jobs retain their recovery link; a previous
-successful job never substitutes for current version checks. Pending plans show
-their own pinned target versions, labelled **przygotowane**, alongside any
+successful job never substitutes for current version checks. After a successful
+update, the application detail screen also reads current and published versions; the saved result,
+recovery information and progress are collapsed under **Poprzednia aktualizacja**.
+Checking a new update prepares a fresh plan and still requires **Importuj**.
+Pending plans show their own pinned target versions, labelled **przygotowane**, alongside any
 other newly published versions. A new version set
 remains visible without replacing or approving the saved job. If the reviewed
 publication check is unavailable, that check is explicitly marked unknown. Application

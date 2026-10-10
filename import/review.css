@@ -608,6 +608,12 @@ code {
 .project-page .actions {
   justify-content: flex-start;
 }
+.previous-update > summary {
+  cursor: pointer;
+  color: var(--muted);
+  padding: 16px 0;
+  font-weight: 600;
+}
 .pill {
   display: inline-block;
   font-size: 13px;
