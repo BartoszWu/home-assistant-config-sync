@@ -15,6 +15,7 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.request import Request
+from urllib.error import HTTPError
 
 from project_executor import Executor
 from project_recovery import RecoveryCheckpoint, RecoveryPlan, atomic_json, digest
@@ -23,6 +24,34 @@ VERSION = re.compile(r"\d+\.\d+\.\d+\Z")
 SHA = re.compile(r"[a-f0-9]{40}\Z")
 HASH = re.compile(r"[a-f0-9]{64}\Z")
 MAX_ARCHIVE = 2 * 1024 * 1024
+
+
+def discovered_release(backend, project):
+    """Read publication metadata; an old executor can still use the configured set."""
+    try:
+        value = backend.request("/releases/latest", timeout=6)
+    except HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "sha",
+        "integration_version",
+    }:
+        raise ValueError("Nieprawidłowe dane opublikowanego wydania")
+    if not isinstance(value["sha"], str) or not SHA.fullmatch(value["sha"]):
+        raise ValueError("Nieprawidłowa rewizja wydania")
+    release_set(
+        {
+            "schema_version": 2,
+            "project": project.id,
+            "backend_version": value["version"],
+            "integration_version": value["integration_version"],
+        },
+        project,
+    )
+    return value
 
 
 def release_set(value, project):
@@ -372,8 +401,18 @@ class Deployments:
         atomic_json(self.directory / "job.json", job)
 
     def prepare(self):
+        latest = discovered_release(self.backend, self.project)
         source_sha, releases, dashboard_plan = self.dashboard.preview(self.project)
-        return self._review(releases, source_sha, dashboard_plan)
+        if latest:
+            releases = {
+                "schema_version": 2,
+                "project": self.project.id,
+                "backend_version": latest["version"],
+                "integration_version": latest["integration_version"],
+            }
+        return self._review(
+            releases, source_sha, dashboard_plan, expected_backend=latest
+        )
 
     def recover_approved(self):
         job = self.read()
@@ -400,7 +439,7 @@ class Deployments:
         job["recovery_checkpoint"] = self.recovery.prepare(plan)
         self._save(job)
 
-    def _review(self, releases, source_sha, dashboard_plan):
+    def _review(self, releases, source_sha, dashboard_plan, *, expected_backend=None):
         with self.lock:
             old = self.read()
             if self._running or (
@@ -419,9 +458,22 @@ class Deployments:
                 "backend_version"
             ] or not SHA.fullmatch(backend.get("sha", "")):
                 raise ValueError("Nieprawidłowe wydanie backendu")
+            if expected_backend and any(
+                backend[k] != expected_backend[k] for k in ("version", "sha")
+            ):
+                raise ValueError("Opublikowane wydanie zmieniło się; sprawdź ponownie")
             active = self.backend.request("/status")
             if not active.get("healthy") or not SHA.fullmatch(active.get("sha", "")):
                 raise ValueError("Backend nie jest gotowy do aktualizacji")
+            if expected_backend and (
+                not isinstance(active.get("version"), str)
+                or not VERSION.fullmatch(active["version"])
+            ):
+                raise ValueError("Nie można potwierdzić zainstalowanej wersji")
+            if expected_backend and tuple(
+                map(int, backend["version"].split("."))
+            ) < tuple(map(int, active["version"].split("."))):
+                raise ValueError("Zainstalowana jest nowsza wersja aplikacji")
             backend_changed = any(
                 active.get(k) != backend[k] for k in ("sha", "version")
             )
@@ -473,6 +525,13 @@ class Deployments:
                 and VERSION.fullmatch(current_version)
                 else None
             )
+            if (
+                expected_backend
+                and job["integration_version_before"]
+                and tuple(map(int, releases["integration_version"].split(".")))
+                < tuple(map(int, job["integration_version_before"].split(".")))
+            ):
+                raise ValueError("Zainstalowana jest nowsza wersja integracji")
             job["restart"] = (
                 job["restart"]
                 or job["integration_version_before"] != releases["integration_version"]

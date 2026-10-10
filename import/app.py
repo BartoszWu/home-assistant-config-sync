@@ -1115,9 +1115,14 @@ class DashboardAccess:
             )
             if revision.stale or (sha and revision.commit_sha != sha):
                 raise ValueError("Reviewed configuration revision changed")
-            releases = release_set(
-                load_json(WORKDIR / "deployments" / (project.id + ".json")), project
-            )
+            # Publication discovery selects application versions independently of
+            # this pinned configuration tree. Keep the legacy set for old executors.
+            try:
+                releases = release_set(
+                    load_json(WORKDIR / "deployments" / (project.id + ".json")), project
+                )
+            except (OSError, ValueError):
+                releases = None
             entries = managed_entries_for_revision()
             managed, _ = collect_managed_changes(
                 WORKDIR,

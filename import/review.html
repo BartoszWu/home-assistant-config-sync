@@ -100,7 +100,7 @@
 <span class="small">{{ component.target_label or "w konfiguracji" }} </span>{{ component.target }}</span>{% endif %}
 {% endif %}</span>
 {% if component.available_target %}
-<span class="version-available"><span class="small">Dostępne w konfiguracji </span><strong>{{ component.available_target }}</strong></span>{% endif %}
+<span class="version-available"><span class="small">{{ component.available_label or "Dostępne w konfiguracji" }} </span><strong>{{ component.available_target }}</strong></span>{% endif %}
 </div>{% endfor %}
 </div>
 <div class="app-action">

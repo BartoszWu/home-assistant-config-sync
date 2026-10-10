@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from urllib.error import HTTPError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "import"))
 from project_deployment import (
@@ -66,6 +67,10 @@ class FakeBackend:
             return {"recovery_receipt": 1, "minimum_version": "0.1.0"}
         if path == "/status":
             return dict(self.active)
+        if path == "/releases/latest":
+            if hasattr(self, "published"):
+                return dict(self.published)
+            raise HTTPError("http://executor.test", 404, "Unsupported", {}, None)
         if path.startswith("/release"):
             return dict(self.target)
         if path == "/jobs":
