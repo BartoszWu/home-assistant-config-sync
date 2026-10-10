@@ -132,15 +132,18 @@ never expose selectable Apply items. An interrupted stream blocks selection and
 offers a fresh check. The all-current summary appears only after both sections
 finish. Without JavaScript, **otwórz pełny przegląd** opens the complete synchronous
 review. **Aplikacje** compares current backend and loaded HA integration
-versions with the approved version set in the reviewed `main` commit. These
-are read-only status calls with short timeouts; opening Import does not prepare
+versions with the latest complete, stable GitHub Release reported by the local
+executor through authenticated `GET /releases/latest` (six-second timeout).
+The executor uses its existing repository-scoped Contents-read credential;
+Import needs no GitHub write key or version-promotion PR. These
+are read-only metadata/status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
 remain unknown. Saved pending/failed jobs retain their recovery link; a previous
 successful job never substitutes for current version checks. Pending plans show
 their own pinned target versions, labelled **przygotowane**, alongside any
-other available versions from the reviewed configuration. A new version set
+other newly published versions. A new version set
 remains visible without replacing or approving the saved job. If the reviewed
-configuration is unavailable, that check is explicitly marked unknown. Application
+publication check is unavailable, that check is explicitly marked unknown. Application
 updates still require their separate review and explicit approval. Feature
 branches and explicit commit reviews do not offer application updates from a
 different source.
@@ -350,7 +353,17 @@ prywatnego tunelu/TLS. W lokalnym `/review` umieść `jdg-deploy-token` i `jdg.j
 Plik klucza jest zwykłym plikiem w tym samym katalogu; połączenie nie dopuszcza
 przekierowania z bearerem. Adres i klucz pozostają poza Git. Dla kolejnego
 obsługiwanego projektu lokalne pliki mają jego ID, np. `<id>.json`.
-W canonical konfiguracji HA wersje wybiera `deployments/jdg.json`:
+Import 0.17.0+ wybiera najnowsze kompletne stabilne wydanie przez lokalnego
+wykonawcę. Wydanie musi mieć ZIP i SHA-256 integracji; wersja integracji pochodzi
+z manifestu w tym samym niezmiennym SHA. Odczyt listy nie pobiera paczki i nie
+uruchamia aktualizacji. Drafty i prerelease są pomijane. Wykonawca ogranicza
+odczyty metadanych do swojego repo i cache'uje je przez maksymalnie 30 sekund.
+Wymaga jednorazowej aktualizacji kodu wykonawcy poza aktywnym backendem.
+Brak obsługi `/releases/latest` (404) zachowuje starszy przepływ, ale ekran
+informuje, że opublikowanych wydań nie sprawdzono; inny błąd nie wybiera po cichu
+starszej wersji z konfiguracji. Nie pokazuje wtedy „Wszystko jest aktualne”.
+
+Dla starszego wykonawcy wersje nadal wybiera `deployments/jdg.json`:
 
 ```json
 {
@@ -361,8 +374,12 @@ W canonical konfiguracji HA wersje wybiera `deployments/jdg.json`:
 }
 ```
 
-Najpierw publikujemy prywatne wydanie backendu z paczką integracji, następnie
-scalamy zestaw konfiguracji. Dashboardy i moduły pochodzą z tego samego
+Po publikacji prywatnego wydania backendu z paczką integracji wystarczy otworzyć
+Import i przygotować aktualizację. Nowy plan przypina wersje backendu/integracji
+oraz SHA backendu; zmiana taga podczas przygotowania blokuje plan, a późniejsze
+wydanie nie zmienia zatwierdzonego zadania. Automatyczny downgrade jest blokowany.
+Nie trzeba zmieniać `deployments/*.json` ani scalać PR po każdym wydaniu.
+Dashboardy i moduły nadal pochodzą z tego samego
 zatwierdzonego SHA konfiguracji. Konflikty lub ostrzeżenia zatrzymują skrót;
 rozwiąż je w zwykłym review. Integracja musi być już skonfigurowana i działająca.
 

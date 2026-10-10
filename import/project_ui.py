@@ -12,6 +12,7 @@ from project_deployment import (
     Deployments,
     Installer,
     release_set,
+    discovered_release,
 )
 from project_profiles import PROJECTS
 from review_ui import STYLE
@@ -22,7 +23,7 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
 {% if job and job.status == "cancelled" %}<p class="notice" role="status">Przygotowana aktualizacja została anulowana.</p>{% endif %}
 {% if not configured %}<div class="panel"><strong>Potrzebna jednorazowa konfiguracja</strong><p>Połącz Import z lokalnym wykonawcą aktualizacji projektu. Instrukcja instalacji opisuje dedykowany klucz i konfigurację połączenia.</p></div>
-{% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import odczyta zatwierdzony zestaw z konfiguracji i przygotuje podgląd. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź aktualizację</button></form></div>
+{% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import sprawdzi najnowsze opublikowane wydanie aplikacji i przygotuje plan z kartami oraz dashboardami z konfiguracji. Starszy wykonawca korzysta z wersji wybranych w konfiguracji. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź aktualizację</button></form></div>
 {% else %}<div class="panel"><span class="pill">{{ labels.get(job.status, job.status) }}</span>
 <div class="row"><strong>Backend {{ project.title }}</strong><span class="value"><small>{{ job.backend_before.version or "Nieznana" }} → </small>{{ job.releases.backend_version }}</span></div>
 <div class="row"><strong>Integracja HA</strong><span class="value"><small>{{ job.integration_version_before or "Nieznana" }} → </small>{{ job.releases.integration_version }}</span></div>
@@ -301,6 +302,8 @@ def register(
             job = None
             pinned_target = None
             read_error = False
+            published = False
+            discovery_unknown = False
             if canonical:
                 # Do not use get_manager: opening this list must never launch work.
                 try:
@@ -337,6 +340,20 @@ def register(
                             backend_version = version
                     except Exception:  # noqa: BLE001, S110 - credential-bearing errors stay private.
                         pass
+                    try:
+                        latest = discovered_release(backend_factory(config), project)
+                        if latest:
+                            target = {
+                                "backend_version": latest["version"],
+                                "integration_version": latest["integration_version"],
+                            }
+                            published = True
+                        else:
+                            discovery_unknown = True
+                    except Exception:  # noqa: BLE001 - failed metadata reads never imply up-to-date.
+                        discovery_unknown = True
+                        # Do not offer a stale configured release after a failed publication check.
+                        target = None
                 try:
                     loaded = ha_call(project.domain + "/version", _timeout=4)
                 except Exception:  # noqa: BLE001 - unavailable HA stays unknown.
@@ -346,13 +363,28 @@ def register(
                     if isinstance(version, str) and VERSION.fullmatch(version):
                         integration_version = version
             displayed_target = pinned_target or target
-            target_label = "przygotowane" if pinned_target else "w konfiguracji"
+            target_label = (
+                "przygotowane"
+                if pinned_target
+                else "dostępne"
+                if published
+                else "w konfiguracji"
+            )
             components = []
             for label, key, current in (
                 ("Usługa", "backend_version", backend_version),
                 ("Integracja HA", "integration_version", integration_version),
             ):
                 version = displayed_target.get(key) if displayed_target else None
+                if (
+                    published
+                    and not pinned_target
+                    and current
+                    and version
+                    and tuple(map(int, current.split(".")))
+                    > tuple(map(int, version.split(".")))
+                ):
+                    version = current
                 available = target.get(key) if pinned_target and target else None
                 components.append(
                     {
@@ -361,11 +393,18 @@ def register(
                         "target_label": target_label,
                         "target": version,
                         "available_target": available if available != version else None,
+                        "available_label": "Opublikowane"
+                        if published
+                        else "Dostępne w konfiguracji",
                     }
                 )
             has_new_versions = any(c["available_target"] for c in components)
             state, label, action = "same", "Bez zmian", "Otwórz"
-            description = "Wersje zgodne z konfiguracją"
+            description = (
+                "Masz najnowsze opublikowane wydanie"
+                if published
+                else "Wersje zgodne z konfiguracją"
+            )
             if not canonical:
                 state, label = "source", "Sprawdź na main"
                 description = "Aktualizacje aplikacji korzystają z main"
@@ -386,13 +425,25 @@ def register(
             elif any(c["current"] and c["current"] != c["target"] for c in components):
                 state, label, action = (
                     "update",
-                    "Dostępna zmiana",
+                    "Nowe wydanie" if published else "Dostępna zmiana",
                     "Sprawdź aktualizację",
                 )
                 description = "Wersje do zmiany"
             elif any(not c["current"] for c in components):
                 state, label = "unknown", "Nie udało się sprawdzić"
                 description = "Sprawdź połączenie i zestaw wersji"
+            elif discovery_unknown:
+                state, label = "unknown", "Nie sprawdzono wydań"
+                description = "Wykonawca wymaga obsługi sprawdzania wydań"
+            elif published and any(
+                c["current"]
+                and tuple(map(int, c["current"].split(".")))
+                > tuple(map(int, target[key].split(".")))
+                for c, key in zip(
+                    components, ("backend_version", "integration_version")
+                )
+            ):
+                description = "Zainstalowane wersje są nowsze od opublikowanego wydania"
             result.append(
                 {
                     "id": project.id,
@@ -403,7 +454,8 @@ def register(
                     "description": description,
                     "components": components,
                     "has_new_versions": has_new_versions,
-                    "availability_unknown": bool(pinned_target and not target),
+                    "availability_unknown": discovery_unknown
+                    or bool(pinned_target and not target),
                 }
             )
         return result

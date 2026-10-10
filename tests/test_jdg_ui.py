@@ -90,7 +90,8 @@ class UI(unittest.TestCase):
                 revision = SourceRevision(
                     "main", "branch", self.sha, self.sha[:7], ("main",)
                 )
-                releases = json.loads((self.root / "deployments/jdg.json").read_text())
+                manifest = self.root / "deployments/jdg.json"
+                releases = json.loads(manifest.read_text()) if manifest.exists() else None
                 return (
                     revision,
                     releases,
@@ -226,10 +227,70 @@ class UI(unittest.TestCase):
         self.assertEqual(project["components"][0]["current"], "0.1.0")
         self.assertEqual(project["components"][0]["target"], "0.3.0")
         self.assertEqual(project["components"][1]["current"], "0.7.0")
-        self.assertEqual(self.backend.calls, [("/status", None)])
+        self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
         self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
         self.assertIsNone(self.manager().read())
         self.assertFalse((self.root / "data/jdg").exists())
+
+    def test_published_release_is_visible_and_prepared_without_changing_configuration(self):
+        before = (self.root / "deployments/jdg.json").read_bytes()
+        self.manager().installer.target.mkdir(parents=True)
+        self.backend.published = {"version": "0.4.0", "sha": "d" * 40, "integration_version": "0.8.0"}
+        project = self.overview()
+        self.assertEqual(project["state"], "update")
+        self.assertEqual([c["target"] for c in project["components"]], ["0.4.0", "0.8.0"])
+        self.assertEqual(project["components"][0]["target_label"], "dostępne")
+        self.assertIsNone(self.manager().read())
+        self.assertFalse(any(path.startswith("/integration") or path == "/jobs" for path, _ in self.backend.calls))
+        self.backend.target = {"version": "0.4.0", "sha": "d" * 40}
+        response = self.client.post("/projects/jdg/review")
+        self.assertEqual(response.status_code, 303)
+        original = self.manager().read()
+        self.assertEqual(original["releases"]["backend_version"], "0.4.0")
+        self.assertEqual(original["backend"]["sha"], "d" * 40)
+        self.assertEqual(original["source_sha"], self.sha)
+        self.assertEqual((self.root / "deployments/jdg.json").read_bytes(), before)
+        self.backend.published = {"version": "0.5.0", "sha": "e" * 40, "integration_version": "0.9.0"}
+        project = self.overview()
+        self.assertEqual([c["target"] for c in project["components"]], ["0.4.0", "0.8.0"])
+        self.assertEqual([c["available_target"] for c in project["components"]], ["0.5.0", "0.9.0"])
+        self.assertEqual(self.manager().read(), original)
+
+    def test_discovery_failure_never_claims_current_or_prepares_stale_configured_release(self):
+        self.backend.published = {"version": "0.4.0", "sha": "invalid", "integration_version": "0.8.0"}
+        project = self.overview()
+        self.assertEqual(project["state"], "unknown")
+        self.assertTrue(project["availability_unknown"])
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 409)
+        self.assertIsNone(self.manager().read())
+        self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
+
+    def test_discovery_commit_change_between_check_and_preparation_blocks_review(self):
+        self.backend.published = {**self.backend.target, "integration_version": "0.7.0", "sha": "d" * 40}
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 409)
+        self.assertIsNone(self.manager().read())
+
+    def test_current_release_is_determined_by_publication_even_without_version_manifest(self):
+        self.backend.active["version"] = "0.3.0"
+        self.backend.published = {**self.backend.target, "integration_version": "0.7.0"}
+        self.manager().installer.target.mkdir(parents=True)
+        project = self.app.extensions["project_overview"]({"jdg": None})[0]
+        self.assertEqual(project["state"], "same")
+        self.assertFalse(project["availability_unknown"])
+        self.assertIn("opublikowane", project["description"])
+        (self.root / "deployments/jdg.json").unlink()
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 303)
+        self.assertEqual(self.manager().read()["releases"]["backend_version"], "0.3.0")
+
+    def test_newer_installed_version_is_not_offered_a_downgrade(self):
+        self.backend.active["version"] = "0.5.0"
+        self.backend.published = {**self.backend.target, "integration_version": "0.7.0"}
+        self.manager().installer.target.mkdir(parents=True)
+        project = self.overview()
+        self.assertEqual(project["state"], "same")
+        self.assertEqual(project["components"][0]["target"], "0.5.0")
+        self.assertEqual(self.client.post("/projects/jdg/review").status_code, 409)
+        self.assertIsNone(self.manager().read())
 
     def test_saved_success_does_not_hide_new_application_version(self):
         self.client.post("/projects/jdg/review")
@@ -244,7 +305,7 @@ class UI(unittest.TestCase):
         self.assertEqual(project["components"][0]["target"], "0.4.0")
         self.assertEqual(project["components"][1]["target"], "0.8.0")
         self.assertEqual(self.manager().read()["status"], "success")
-        self.assertEqual(self.backend.calls, [("/status", None)])
+        self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
 
     def test_unreachable_service_keeps_known_integration_and_redacts_error(self):
         self.manager().installer.target.mkdir(parents=True)
@@ -270,7 +331,7 @@ class UI(unittest.TestCase):
         self.manager()._save(job)
         self.backend.calls.clear()
         self.assertEqual(self.overview()["state"], "unknown")
-        self.assertEqual(self.backend.calls, [("/status", None)])
+        self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
         self.assertFalse(any(path == "/jobs" for path, _ in self.backend.calls))
 
     def test_pending_plan_does_not_display_new_main_versions_as_approved(self):
@@ -295,7 +356,7 @@ class UI(unittest.TestCase):
                 self.assertEqual([c["target"] for c in project["components"]], ["0.3.0", "0.7.0"])
                 self.assertEqual([c["available_target"] for c in project["components"]], ["0.4.0", "0.8.0"])
                 self.assertEqual(self.manager().read(), original)
-                self.assertEqual(self.backend.calls, [("/status", None)])
+                self.assertEqual(self.backend.calls, [("/status", None), ("/releases/latest", None)])
                 self.assertEqual([kind for kind, _ in self.actions], ["jdg_ksiegowy/version"])
 
     def test_pending_job_does_not_invent_available_versions_when_targets_are_missing(self):
