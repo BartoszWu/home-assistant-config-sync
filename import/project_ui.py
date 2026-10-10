@@ -21,6 +21,11 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 {% if job and job.status == 'running' %}<meta http-equiv="refresh" content="5">{% endif %}
 <title>Import {{ project.title }}</title><style>{{ ui_style|safe }}</style><main class="project-page"><a id="project-back" href="../../">Wróć do Importu</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
 {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+{% if availability %}<div class="panel" aria-label="Aktualne wersje aplikacji"><span class="status {{ availability.state }}">{{ availability.status_label }}</span><p>{{ availability.description }}</p>
+{% for component in availability.components %}<div class="row"><strong>{{ component.label }}</strong><span class="value">{{ component.current or "Nieznana" }}{% if component.target and component.target != component.current %} → <small>{{ component.target_label }}</small> {{ component.target }}{% endif %}</span></div>{% endfor %}
+{% if availability.availability_unknown %}<p class="small">Nie udało się sprawdzić dostępnych wersji. Ponów sprawdzenie przed aktualizacją.</p>{% endif %}
+<form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>{% if availability.state == 'update' %}Sprawdź aktualizację{% else %}Sprawdź ponownie{% endif %}</button></form></div>
+<details class="previous-update"><summary>Poprzednia aktualizacja — {{ job.releases.backend_version }}</summary>{% endif %}
 {% if job and job.status == "cancelled" %}<p class="notice" role="status">Przygotowana aktualizacja została anulowana.</p>{% endif %}
 {% if not configured %}<div class="panel"><strong>Potrzebna jednorazowa konfiguracja</strong><p>Połącz Import z lokalnym wykonawcą aktualizacji projektu. Instrukcja instalacji opisuje dedykowany klucz i konfigurację połączenia.</p></div>
 {% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import sprawdzi najnowsze opublikowane wydanie aplikacji i przygotuje plan z kartami oraz dashboardami z konfiguracji. Starszy wykonawca korzysta z wersji wybranych w konfiguracji. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź aktualizację</button></form></div>
@@ -32,10 +37,11 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 {% if job.status == 'review' %}<p class="notice">Import zabezpieczy zmieniane elementy zgodnie z planem, zaktualizuje backend i integrację, {% if job.restart %}zrestartuje Home Assistant, {% endif %}a następnie wgra dashboard i sprawdzi działanie. {% if job.restart %}Podczas restartu HA będzie przez chwilę niedostępny.{% endif %}{% if project.legacy_hacs_repository %} Jeśli integracją zarządza HACS, Import przejmie jej aktualizacje.{% endif %}</p><div class="actions"><form method="post" action="start" data-busy-message="Uruchamianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><input type="hidden" name="review_hash" value="{{ job.review_hash }}"><button>Importuj {{ project.title }}</button></form><form method="post" action="cancel" data-busy-message="Anulowanie aktualizacji…"><input type="hidden" name="id" value="{{ job.id }}"><button class="secondary">Anuluj</button></form></div>
 {% elif job.status == 'running' %}<p class="notice" role="status">Trwa: {{ stages.get(job.stage, job.stage) }}. Możesz zamknąć ten ekran. Postęp zostanie zapisany.</p>
 {% elif job.status == 'failed' %}<p class="notice error">Przerwano etap: {{ stages.get(job.stage, job.stage) }}. {{ job.message }}</p><form method="post" action="resume" data-busy-message="Wznawianie importu…"><input type="hidden" name="id" value="{{ job.id }}"><button>Wznów import</button></form>
-{% else %}<p class="notice">{{ project.title }} został zaktualizowany. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź kolejną aktualizację</button></form>{% endif %}
+{% else %}<p class="notice">Poprzedni import zakończył się poprawnie. Potwierdzono działający backend, załadowaną integrację oraz dashboard. Odśwież otwarte dashboardy, aby załadować nowy widok.</p>{% endif %}
 {% endif %}
 {% if job %}<div class="panel"><strong>Zabezpieczenie aktualizacji</strong><ul>{% for item in recovery_items %}<li>{{ item }}</li>{% endfor %}</ul></div>{% endif %}
 {% if job and job.status in ('running', 'failed', 'success') %}<div class="panel"><strong>Postęp aktualizacji</strong><ol class="application-steps" aria-label="Etapy aktualizacji">{% for step in progress_steps %}<li class="step-{{ step.state }}"{% if step.state == 'current' %} aria-current="step"{% endif %}><span>{{ step.label }}</span><small>{{ step.status }}</small></li>{% endfor %}</ol></div>{% endif %}
+{% if availability %}</details>{% endif %}
 </main>
 <div id="project-progress" class="refresh-progress project-progress" role="status" aria-live="polite">
 <div class="refresh-progress-card"><span class="spinner" aria-hidden="true"></span><span data-busy-label></span></div>
@@ -282,6 +288,9 @@ def register(
             project=project,
             configured=configured,
             job=job,
+            availability=overview({}, project_id=project.id)[0]
+            if job and job["status"] == "success"
+            else None,
             error=error,
             labels=LABELS,
             stages=STAGES,
@@ -291,10 +300,12 @@ def register(
             ui_script=SCRIPT,
         )
 
-    def overview(targets, *, canonical=True):
+    def overview(targets, *, canonical=True, project_id=None):
         """Fresh read-only availability, independent of stored deployment reviews."""
         result = []
         for project in projects.values():
+            if project_id is not None and project.id != project_id:
+                continue
             target = targets.get(project.id) if canonical else None
             config = config_directory / (project.id + ".json")
             configured = config.is_file()
