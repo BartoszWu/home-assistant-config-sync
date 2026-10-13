@@ -343,7 +343,8 @@ class UI(unittest.TestCase):
         job = self.saved_success()
         self.backend.published = {"version": "0.4.0", "sha": "invalid", "integration_version": "0.7.0"}
         html = self.client.get("/projects/jdg/").get_data(as_text=True)
-        self.assertIn("Nie udało się sprawdzić", html)
+        self.assertIn("Nie sprawdzono wydań", html)
+        self.assertIn("Sprawdzanie wydań", html)
         self.assertNotIn("Masz najnowsze opublikowane wydanie", html)
         self.assertEqual(self.manager().read(), job)
 
@@ -402,6 +403,57 @@ class UI(unittest.TestCase):
         self.assertEqual(project["components"][1]["current"], "0.7.0")
         self.assertNotIn("sensitive", str(project))
         self.assertIsNone(self.manager().read())
+
+    def test_executor_timeout_explains_failed_checks_without_exposing_connection(self):
+        self.manager().installer.target.mkdir(parents=True)
+        self.backend.request = lambda *args, **kwargs: (_ for _ in ()).throw(
+            TimeoutError("synthetic private endpoint and deploy credential")
+        )
+        project = self.overview()
+        self.assertEqual(project["status_label"], "Brak połączenia")
+        self.assertEqual(project["components"][1]["current"], "0.7.0")
+        self.assertEqual(len(project["diagnostics"]), 2)
+        self.assertIn("nie odpowiada", project["diagnostics"][0])
+        self.assertIn("wydań", project["diagnostics"][1])
+        self.assertNotIn("private endpoint", str(project))
+        self.assertNotIn("credential", str(project))
+        self.assertIsNone(self.manager().read())
+        html = self.client.get("/projects/jdg/").get_data(as_text=True)
+        self.assertIn("Brak połączenia", html)
+        self.assertIn("nie odpowiada", html)
+        self.assertNotIn("private endpoint", html)
+        self.assertNotIn("Poprzednia aktualizacja", html)
+
+    def test_publication_auth_failure_preserves_current_service_and_explains_key(self):
+        from urllib.error import HTTPError
+        original = self.backend.request
+
+        def read(path, *args, **kwargs):
+            if path == "/releases/latest":
+                raise HTTPError("synthetic private endpoint", 403, "synthetic secret", {}, None)
+            return original(path, *args, **kwargs)
+
+        self.backend.request = read
+        project = self.overview()
+        self.assertEqual(project["components"][0]["current"], "0.1.0")
+        self.assertIsNone(project["components"][0]["target"])
+        self.assertEqual(project["state"], "unknown")
+        self.assertEqual(project["status_label"], "Nie sprawdzono wydań")
+        self.assertIn("odrzucił klucz", project["diagnostics"][0])
+        self.assertNotIn("synthetic secret", str(project))
+        self.assertNotIn("private endpoint", str(project))
+        self.assertIsNone(self.manager().read())
+
+    def test_connection_diagnostics_classify_wrapped_timeout_and_redact_response_errors(self):
+        from urllib.error import URLError
+        from project_ui import check_failure
+        for error in (TimeoutError("private"), URLError(TimeoutError("private")), ConnectionRefusedError("private")):
+            category, message = check_failure(error)
+            self.assertEqual(category, "connection")
+            self.assertNotIn("private", message)
+        category, message = check_failure(ValueError("private response"), releases=True)
+        self.assertEqual(category, "response")
+        self.assertNotIn("private", message)
 
     def test_feature_source_does_not_offer_main_application_versions(self):
         project = self.overview(canonical=False)

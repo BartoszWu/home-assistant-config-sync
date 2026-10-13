@@ -83,7 +83,7 @@
 <div>
 <h3>{{ project.title }}</h3>
 <span class="small">{{ project.description }}</span>
-{% if project.has_new_versions %}<span class="availability-note">Dostępny nowy zestaw wersji</span>{% elif project.availability_unknown %}<span class="small">Nie udało się sprawdzić dostępnych wersji</span>{% endif %}
+{% if project.has_new_versions %}<span class="availability-note">Dostępny nowy zestaw wersji</span>{% elif project.availability_unknown and not project.diagnostics %}<span class="small">Nie udało się sprawdzić dostępnych wersji</span>{% endif %}
 </div>
 </div>
 <div class="version-list">{% for component in project.components %}
@@ -107,6 +107,7 @@
 <span class="status {{ project.state }}">{{ project.status_label }}</span>
 <a href="projects/{{ project.id }}/">{{ project.action_label }}</a>
 </div>
+{% if project.diagnostics %}<ul class="app-diagnostics small">{% for diagnostic in project.diagnostics %}<li>{{ diagnostic }}</li>{% endfor %}</ul>{% endif %}
 </div>{% else %}
 <div class="empty-state">Brak aplikacji obsługiwanych przez Import.</div>{% endfor %}
 </div>

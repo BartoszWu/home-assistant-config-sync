@@ -138,7 +138,16 @@ The executor uses its existing repository-scoped Contents-read credential;
 Import needs no GitHub write key or version-promotion PR. These
 are read-only metadata/status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
-remain unknown. Saved pending/failed jobs retain their recovery link; a previous
+remain unknown. A successful read of the HA integration does not prove that the backend executor
+is reachable. Failed service-version and release checks show separate sanitized
+diagnostics: connection failure, rejected deploy key, request limit or invalid
+executor response. The application detail page also shows these checks before
+the first saved plan. Exception text, addresses and credentials are never rendered.
+If a connection fails, verify the executor's configured address, current guest
+address and listening interface; a running service can retain a socket bound to
+an old address after a DHCP change. Fixing that network configuration is separate
+from checking versions and does not authorize an Import or restart.
+Saved pending/failed jobs retain their recovery link; a previous
 successful job never substitutes for current version checks. After a successful
 update, the application detail screen also reads current and published versions; the saved result,
 recovery information and progress are collapsed under **Poprzednia aktualizacja**.
