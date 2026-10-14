@@ -138,7 +138,16 @@ The executor uses its existing repository-scoped Contents-read credential;
 Import needs no GitHub write key or version-promotion PR. These
 are read-only metadata/status calls with short timeouts; opening Import does not prepare
 a deployment, download a package or approve an update. Unavailable versions
-remain unknown. Saved pending/failed jobs retain their recovery link; a previous
+remain unknown. A successful read of the HA integration does not prove that the backend executor
+is reachable. Failed service-version and release checks show separate sanitized
+diagnostics: connection failure, rejected deploy key, request limit or invalid
+executor response. The application detail page also shows these checks before
+the first saved plan. Exception text, addresses and credentials are never rendered.
+If a connection fails, verify the executor's configured address, current guest
+address and listening interface; a running service can retain a socket bound to
+an old address after a DHCP change. Fixing that network configuration is separate
+from checking versions and does not authorize an Import or restart.
+Saved pending/failed jobs retain their recovery link; a previous
 successful job never substitutes for current version checks. After a successful
 update, the application detail screen also reads current and published versions; the saved result,
 recovery information and progress are collapsed under **Poprzednia aktualizacja**.
@@ -356,6 +365,36 @@ prywatnego tunelu/TLS. W lokalnym `/review` umieść `jdg-deploy-token` i `jdg.j
 Plik klucza jest zwykłym plikiem w tym samym katalogu; połączenie nie dopuszcza
 przekierowania z bearerem. Adres i klucz pozostają poza Git. Dla kolejnego
 obsługiwanego projektu lokalne pliki mają jego ID, np. `<id>.json`.
+
+### Stała tożsamość sieciowa aplikacji
+
+Stosuj ten sam układ dla każdego projektu, bez zapisywania bieżących adresów
+kontenerów w Import lub konfiguracji integracji HA:
+
+1. Zarezerwuj adres DHCP dla gościa i nadaj mu stałą nazwę w lokalnym DNS,
+   np. `aplikacja.home.arpa`. Klienci, w tym HA i Import, muszą korzystać
+   z resolvera obsługującego tę strefę. Sama rezerwacja DHCP nie tworzy DNS.
+2. W lokalnym `backend_url` używaj nazwy DNS i portu wykonawcy, np.
+   `http://aplikacja.home.arpa:3001`. Port zależy od projektu; adres integracji
+   HA wskazuje port API aplikacji, a nie wykonawcy aktualizacji. Import już
+   akceptuje nazwy DNS, więc zmiana adresu nie wymaga zmiany kontraktu projektu.
+3. Po zatwierdzeniu konfiguracji LAN uruchom API i wykonawcę na nasłuchu
+   niezależnym od adresu interfejsu, np. `0.0.0.0`, z aktywnym firewallem
+   ograniczającym dostęp do zatwierdzonych klientów. Bez takiego firewalla
+   zachowaj bezpieczny domyślny nasłuch lokalny. Nazwa DNS jako adres
+   **nasłuchu** nie rozwiązuje problemu: proces może przypiąć IP podczas startu.
+4. Połączenia wewnątrz tego samego gościa kieruj na loopback, zamiast jego IP LAN.
+
+Nowa aplikacja wymaga jednorazowego dodania rezerwacji/nazwy oraz lokalnej
+konfiguracji połączenia. Przy przenoszeniu usługi aktualizuj DNS; konfiguracje
+klientów zachowują nazwę. Statyczny rekord A sam nie śledzi zmian dzierżawy DHCP.
+Nie skanuj sieci ani nie zastępuj adresu wykonawcy na podstawie niezweryfikowanego
+odkrycia. Dedykowany klucz deploy, brak przekierowań i zatwierdzanie Importu
+pozostają wymagane. DNS nie jest mechanizmem uwierzytelniania.
+
+Źródła: [UniFi — lokalne nazwy DNS i rezerwacje DHCP](https://help.ui.com/hc/en-us/articles/15179064940439-UniFi-DNS-Records-and-Local-Hostnames),
+[RFC 8375 — domena `home.arpa`](https://www.rfc-editor.org/rfc/rfc8375).
+
 Import 0.17.0+ wybiera najnowsze kompletne stabilne wydanie przez lokalnego
 wykonawcę. Wydanie musi mieć ZIP i SHA-256 integracji; wersja integracji pochodzi
 z manifestu w tym samym niezmiennym SHA. Odczyt listy nie pobiera paczki i nie

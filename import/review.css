@@ -201,6 +201,11 @@ small {
 .app-row:last-child {
   border-bottom: 0;
 }
+.app-diagnostics {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding-left: 20px;
+}
 .app-name {
   display: flex;
   align-items: center;

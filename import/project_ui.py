@@ -3,6 +3,7 @@
 import threading
 import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 
 from flask import redirect, render_template_string, request
 from project_deployment import (
@@ -17,15 +18,30 @@ from project_deployment import (
 from project_profiles import PROJECTS
 from review_ui import STYLE
 
+
+def check_failure(error, *, releases=False):
+    """Translate failure types, never credential-bearing exception text."""
+    subject = "Sprawdzanie wydań" if releases else "Odczyt wersji usługi"
+    if isinstance(error, HTTPError):
+        if error.code in (401, 403):
+            return "auth", subject + ": wykonawca odrzucił klucz dostępu. Sprawdź dedykowany klucz aktualizacji."
+        if error.code == 429:
+            return "limited", subject + ": przekroczono limit zapytań. Spróbuj ponownie później."
+        return "response", subject + ": wykonawca zwrócił błąd. Sprawdź działanie wykonawcy aktualizacji."
+    if isinstance(error, (TimeoutError, ConnectionError, URLError)):
+        return "connection", subject + ": wykonawca aktualizacji nie odpowiada. Sprawdź jego adres, sieć i działanie usługi."
+    return "response", subject + ": nie można odczytać poprawnej odpowiedzi wykonawcy. Sprawdź jego konfigurację i wersję."
+
 TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 {% if job and job.status == 'running' %}<meta http-equiv="refresh" content="5">{% endif %}
 <title>Import {{ project.title }}</title><style>{{ ui_style|safe }}</style><main class="project-page"><a id="project-back" href="../../">Wróć do Importu</a><h1>Aktualizacja {{ project.title }}</h1><p>Backend, integracja Home Assistant i dashboard w jednym imporcie.</p>
 {% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
 {% if availability %}<div class="panel" aria-label="Aktualne wersje aplikacji"><span class="status {{ availability.state }}">{{ availability.status_label }}</span><p>{{ availability.description }}</p>
+{% if availability.diagnostics %}<ul class="small">{% for diagnostic in availability.diagnostics %}<li>{{ diagnostic }}</li>{% endfor %}</ul>{% endif %}
 {% for component in availability.components %}<div class="row"><strong>{{ component.label }}</strong><span class="value">{{ component.current or "Nieznana" }}{% if component.target and component.target != component.current %} → <small>{{ component.target_label }}</small> {{ component.target }}{% endif %}</span></div>{% endfor %}
-{% if availability.availability_unknown %}<p class="small">Nie udało się sprawdzić dostępnych wersji. Ponów sprawdzenie przed aktualizacją.</p>{% endif %}
-<form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>{% if availability.state == 'update' %}Sprawdź aktualizację{% else %}Sprawdź ponownie{% endif %}</button></form></div>
-<details class="previous-update"><summary>Poprzednia aktualizacja — {{ job.releases.backend_version }}</summary>{% endif %}
+{% if availability.availability_unknown and not availability.diagnostics %}<p class="small">Nie udało się sprawdzić dostępnych wersji. Ponów sprawdzenie przed aktualizacją.</p>{% endif %}
+{% if job %}<form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>{% if availability.state == 'update' %}Sprawdź aktualizację{% else %}Sprawdź ponownie{% endif %}</button></form>{% endif %}</div>
+{% if job and job.status == 'success' %}<details class="previous-update"><summary>Poprzednia aktualizacja — {{ job.releases.backend_version }}</summary>{% endif %}{% endif %}
 {% if job and job.status == "cancelled" %}<p class="notice" role="status">Przygotowana aktualizacja została anulowana.</p>{% endif %}
 {% if not configured %}<div class="panel"><strong>Potrzebna jednorazowa konfiguracja</strong><p>Połącz Import z lokalnym wykonawcą aktualizacji projektu. Instrukcja instalacji opisuje dedykowany klucz i konfigurację połączenia.</p></div>
 {% elif not job or job.status == 'cancelled' %}<div class="panel"><strong>Sprawdź dostępne wydania</strong><p>Import sprawdzi najnowsze opublikowane wydanie aplikacji i przygotuje plan z kartami oraz dashboardami z konfiguracji. Starszy wykonawca korzysta z wersji wybranych w konfiguracji. Sprawdzenie nie aktualizuje usług.</p><form method="post" action="review" data-busy-message="Przygotowywanie aktualizacji…"><button>Sprawdź aktualizację</button></form></div>
@@ -41,7 +57,7 @@ TEMPLATE = """<!doctype html><html lang="pl"><meta charset="utf-8"><meta name="v
 {% endif %}
 {% if job %}<div class="panel"><strong>Zabezpieczenie aktualizacji</strong><ul>{% for item in recovery_items %}<li>{{ item }}</li>{% endfor %}</ul></div>{% endif %}
 {% if job and job.status in ('running', 'failed', 'success') %}<div class="panel"><strong>Postęp aktualizacji</strong><ol class="application-steps" aria-label="Etapy aktualizacji">{% for step in progress_steps %}<li class="step-{{ step.state }}"{% if step.state == 'current' %} aria-current="step"{% endif %}><span>{{ step.label }}</span><small>{{ step.status }}</small></li>{% endfor %}</ol></div>{% endif %}
-{% if availability %}</details>{% endif %}
+{% if availability and job and job.status == 'success' %}</details>{% endif %}
 </main>
 <div id="project-progress" class="refresh-progress project-progress" role="status" aria-live="polite">
 <div class="refresh-progress-card"><span class="spinner" aria-hidden="true"></span><span data-busy-label></span></div>
@@ -289,7 +305,7 @@ def register(
             configured=configured,
             job=job,
             availability=overview({}, project_id=project.id)[0]
-            if job and job["status"] == "success"
+            if not job or job["status"] == "success"
             else None,
             error=error,
             labels=LABELS,
@@ -315,6 +331,8 @@ def register(
             read_error = False
             published = False
             discovery_unknown = False
+            diagnostics = []
+            backend_failure = None
             if canonical:
                 # Do not use get_manager: opening this list must never launch work.
                 try:
@@ -349,8 +367,12 @@ def register(
                             and VERSION.fullmatch(version)
                         ):
                             backend_version = version
-                    except Exception:  # noqa: BLE001, S110 - credential-bearing errors stay private.
-                        pass
+                        else:
+                            backend_failure = "response"
+                            diagnostics.append("Odczyt wersji usługi: wykonawca nie potwierdził działającej usługi z poprawną wersją.")
+                    except Exception as error:  # noqa: BLE001 - credential-bearing errors stay private.
+                        backend_failure, message = check_failure(error)
+                        diagnostics.append(message)
                     try:
                         latest = discovered_release(backend_factory(config), project)
                         if latest:
@@ -361,8 +383,11 @@ def register(
                             published = True
                         else:
                             discovery_unknown = True
-                    except Exception:  # noqa: BLE001 - failed metadata reads never imply up-to-date.
+                            diagnostics.append("Sprawdzanie wydań: wykonawca nie obsługuje tej funkcji. Zaktualizuj wykonawcę przed sprawdzeniem najnowszych wydań.")
+                    except Exception as error:  # noqa: BLE001 - failed metadata reads never imply up-to-date.
                         discovery_unknown = True
+                        _, message = check_failure(error, releases=True)
+                        diagnostics.append(message)
                         # Do not offer a stale configured release after a failed publication check.
                         target = None
                 try:
@@ -373,6 +398,8 @@ def register(
                     version = loaded.get("version")
                     if isinstance(version, str) and VERSION.fullmatch(version):
                         integration_version = version
+                if integration_version is None:
+                    diagnostics.append("Integracja HA: nie można potwierdzić załadowanej wersji. Sprawdź integrację w Home Assistant.")
             displayed_target = pinned_target or target
             target_label = (
                 "przygotowane"
@@ -432,7 +459,13 @@ def register(
                 description = "Potrzebna jednorazowa konfiguracja"
             elif not target or not components[0]["current"]:
                 state, label = "unknown", "Nie udało się sprawdzić"
-                description = "Sprawdź połączenie i zestaw wersji"
+                if backend_failure == "connection":
+                    label = "Brak połączenia"
+                elif backend_failure == "auth":
+                    label = "Sprawdź klucz dostępu"
+                elif not target:
+                    label = "Nie sprawdzono wydań"
+                description = "Sprawdzenie aplikacji jest niekompletne"
             elif any(c["current"] and c["current"] != c["target"] for c in components):
                 state, label, action = (
                     "update",
@@ -467,6 +500,7 @@ def register(
                     "has_new_versions": has_new_versions,
                     "availability_unknown": discovery_unknown
                     or bool(pinned_target and not target),
+                    "diagnostics": diagnostics,
                 }
             )
         return result
